@@ -17,6 +17,28 @@ const state = {
   PAGE: 120,
 };
 
+/* ---------- 浏览状态持久化 ----------
+ * 小窗每次关掉再打开都从头看，很难受。把「看的是哪部、搜了什么、缩在哪个分类、
+ * 滚到哪了」存进 localStorage，下次进来原地接着看。
+ *
+ * 优先级：URL 参数 > 本地缓存 > 第一部法典。小窗是被插件带着 codex/q 打开的，
+ * 那代表节点当前的意图，不能被上次的缓存盖掉。
+ */
+const VIEW_KEY = 'qtc-view';
+
+/* 存了多少条已经渲染出来 —— 光记 scrollY 不够：列表是 120 条一批分页渲染的，
+ * 只把滚动位置还原回去、内容却还没铺到那个高度，浏览器只能停在实际高度上。 */
+function readView() {
+  try { return JSON.parse(localStorage.getItem(VIEW_KEY) || 'null') || {}; }
+  catch (e) { return {}; }
+}
+
+function saveView(patch) {
+  try {
+    localStorage.setItem(VIEW_KEY, JSON.stringify(Object.assign(readView(), patch, { ts: Date.now() })));
+  } catch (e) { /* 无痕模式禁写存储时静默跳过，不该因此崩掉整页 */ }
+}
+
 /* ---------- 工具 ---------- */
 
 function esc(s) {
@@ -93,7 +115,8 @@ function populateSelect() {
   sel.onchange = () => selectCodex(sel.value);
 }
 
-async function selectCodex(id) {
+async function selectCodex(id, opts) {
+  const o = opts || {};
   const meta = window.QTC_META.find(m => m.id === id);
   if (!meta) return;
   if (meta.nsfw && !state.nsfwOn) {
@@ -102,9 +125,11 @@ async function selectCodex(id) {
   }
   hideNsfwGate();
   state.codexId = id;
-  state.activePath = [];
-  state.query = '';
-  $('search').value = '';
+  /* opts 只在「回到上次看到哪」时传，用来把分类和搜索词一起带回来。
+     用户自己点下拉切换法典时不传，照旧清空。 */
+  state.activePath = Array.isArray(o.path) ? o.path.slice() : [];
+  state.query = typeof o.query === 'string' ? o.query : '';
+  $('search').value = state.query;
   setStatus(`正在加载 ${meta.title}…`);
   try {
     const data = await loadCodex(id);
@@ -117,9 +142,49 @@ async function selectCodex(id) {
     $('footSource').textContent = `${meta.title} · v${meta.version || '?'} · ${meta.author || '未知作者'}${meta.source ? ' · ' + meta.source : ''}`;
     setStatus(`已加载 ${data.entries.length} 条词条（${meta.title}）`);
     runSearch();
+
+    const targetY = Number(o.scrollY) > 0 ? Number(o.scrollY) : 0;
+    saveView({
+      codexId: id,
+      query: state.query,
+      path: state.activePath,
+      scrollY: targetY,
+    });
+    if (targetY > 0) restoreScroll(targetY);
   } catch (e) {
     setStatus(`加载失败：${e.message}`);
   }
+}
+
+/* 回到上次的滚动位置。
+ * 列表是 120 条一批分页渲染的，内容高度不一定已经铺到目标位置，所以是
+ * 「滚一次 → 不够高就再补一批 → 再滚」，最多补 40 批（≈4800 条）就放弃，
+ * 免得递归停不下来。恢复期间滚动监听暂停写缓存，否则会被中间的中间值覆盖。 */
+let restoring = false;
+
+function restoreScroll(targetY, tries) {
+  const n = tries || 0;
+  restoring = true;
+  requestAnimationFrame(() => {
+    window.scrollTo(0, targetY);
+    const more = $('moreBtn');
+    if (window.scrollY < targetY - 4 && more && n < 40) {
+      more.remove();
+      renderMore();
+      restoreScroll(targetY, n + 1);
+      return;
+    }
+    restoring = false;
+  });
+}
+
+/* 滚动写缓存要节流：scroll 一秒能触发几十次，每次都写 localStorage 会拖慢滚动。 */
+let scrollSaveTimer = null;
+
+function saveScrollSoon() {
+  if (restoring) return;   /* 恢复过程中不写，否则会把目标位置覆盖成中间值 */
+  clearTimeout(scrollSaveTimer);
+  scrollSaveTimer = setTimeout(() => saveView({ scrollY: window.scrollY }), 250);
 }
 
 /* ---------- 分类树 ---------- */
@@ -213,6 +278,9 @@ function runSearch() {
   } else {
     $('empty').hidden = true;
   }
+  /* 筛选条件一变就记一笔：法典 / 搜索词 / 分类，下次进来直接回到这个视图。
+     scrollY 不在这里写 —— patch 是合并的，交给滚动那边的节流去更新。 */
+  saveView({ codexId: state.codexId, query: state.query, path: state.activePath });
 }
 
 function renderMore() {
@@ -491,9 +559,33 @@ function toggleTheme() {
 function init() {
   try {
     populateSelect();
+
+    /* NSFW 授权要先恢复：上次停在 R18 法典的话，晚一步就会先弹一次门。 */
+    try { state.nsfwOn = localStorage.getItem('qtc-nsfw') === '1'; } catch (e) {}
+    $('nsfwToggle').checked = state.nsfwOn;
+
     const first = window.QTC_META[0];
-    $('codexSelect').value = first.id;
-    selectCodex(first.id);
+    /* 参数名是 c / q —— 插件小窗用 buildAtlasUrl() 拼的就是这两个。
+       （站点以前压根没读 URL 参数，所以小窗打开永远是第一部法典，
+       不跟节点上选的那部走；这里补上。） */
+    const sp = new URLSearchParams(location.search);
+    const urlCodex = sp.get('c') || '';
+    const urlQuery = sp.get('q') || '';
+    const saved = readView();
+
+    /* 带 URL 参数 = 插件小窗按节点的意图打开，一切以参数为准，不套上次缓存；
+       没带参数（独立打开 / 双击 bat 启动）才回到上次看到哪。 */
+    const hasUrlCodex = !!(urlCodex && window.QTC_META.some(m => m.id === urlCodex));
+    const savedOk = !hasUrlCodex && !!saved.codexId && window.QTC_META.some(m => m.id === saved.codexId);
+
+    state.onlyNew = !hasUrlCodex && saved.onlyNew === true;
+    $('newToggle').checked = state.onlyNew;
+
+    const startId = hasUrlCodex ? urlCodex : (savedOk ? saved.codexId : first.id);
+    $('codexSelect').value = startId;
+    selectCodex(startId, hasUrlCodex
+      ? { query: urlQuery, path: [] }
+      : (savedOk ? { query: saved.query || '', path: saved.path || [], scrollY: saved.scrollY || 0 } : {}));
   } catch (e) {
     console.error(e);
     $('empty').hidden = false;
@@ -510,9 +602,6 @@ function init() {
   $('themeBtn').onclick = toggleTheme;
   applyThemeIcon();
 
-  /* 恢复 NSFW 开关状态（与日夜模式一致，跨刷新保持） */
-  try { state.nsfwOn = localStorage.getItem('qtc-nsfw') === '1'; } catch (e) {}
-  $('nsfwToggle').checked = state.nsfwOn;
   $('newToggle').addEventListener('change', e => {
     state.onlyNew = e.target.checked;
     runSearch();
@@ -551,6 +640,7 @@ function init() {
       const btn = $('moreBtn');
       if (btn) { btn.remove(); renderMore(); }
     }
+    saveScrollSoon();
   });
 
   $('empty').hidden = false;

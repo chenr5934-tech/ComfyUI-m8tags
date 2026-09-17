@@ -312,6 +312,24 @@ const atlas = {
   listEl: null, posEl: null, negEl: null, countEl: null,
 };
 
+/* 已选栏落 localStorage：在站点里挑了半天攒起来的一批词，关一下小窗就没了，
+   下次还得从头挑一遍 —— 这跟「记录用户行为」是同一件事，都是别让人白忙。
+   连两个语法版本一起存，恢复时不用再向后端要一遍。 */
+const PICKS_KEY = "qtc-atlas-picks";
+
+function loadPicks() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(PICKS_KEY) || "[]");
+    return Array.isArray(arr) ? arr.filter(p => p && p.codex && p.id) : [];
+  } catch (err) { return []; }
+}
+
+function savePicks() {
+  try {
+    localStorage.setItem(PICKS_KEY, JSON.stringify(atlas.picks || []));
+  } catch (err) { /* 无痕模式禁写存储时静默跳过 */ }
+}
+
 function buildAtlasUrl({ codexId, query } = {}) {
   const url = new URL(ATLAS_BASE + "index.html", window.location.origin);
   if (codexId) url.searchParams.set("c", codexId);
@@ -338,7 +356,8 @@ function closeAtlasWindow() {
   atlas.mask = atlas.frame = atlas.search = atlas.onKey = null;
   atlas.node = null;
   atlas.listEl = atlas.posEl = atlas.negEl = atlas.countEl = null;
-  atlas.picks = [];
+  /* 这里**不清** atlas.picks —— 关窗只是收起来，攒的词留着，
+     下次打开由 openAtlasWindow 从 localStorage 恢复。要清空有「清空」按钮。 */
 }
 
 function ensureAtlasStyle() {
@@ -423,7 +442,9 @@ function openAtlasWindow({ node, codexId, query } = {}) {
   if (atlas.mask) closeAtlasWindow(); /* 单例：避免叠出多层小窗 */
 
   atlas.node = node || null;
-  atlas.picks = [];
+  /* 关窗不再清空已选栏，所以内存里通常还有；只有刷新过页面 / 首次打开时是空的，
+     那就从 localStorage 捞回来。 */
+  if (!atlas.picks || !atlas.picks.length) atlas.picks = loadPicks();
 
   /* ---- 顶部工具栏 ---- */
   const mask = document.createElement("div");
@@ -537,7 +558,17 @@ function openAtlasWindow({ node, codexId, query } = {}) {
   libBar.append(libDot, libTitle, libHint, libBtn);
   syncLibBtn();   /* 先把文案摆好，别让按钮空着等第一次 load */
 
-  bar.append(title, hint, search, goBtn, closeBtn);
+  /* 外置打开：站点跟 ComfyUI 同源同端口，直接开这个路由就是完整可用的站点，
+     窗口独立、不再受节点编辑器挤占。想彻底脱离 ComfyUI（关掉 CUI 也能用），
+     就去 atlas/ 里双击「启动法典.bat」，那边起的是独立服务。 */
+  const openBtn = document.createElement("button");
+  openBtn.textContent = "浏览器打开";
+  openBtn.title = "在独立标签页里打开法典（功能与站内小窗一致；想完全脱离 ComfyUI 就用 atlas/启动法典.bat）";
+  openBtn.addEventListener("click", () => {
+    window.open(ATLAS_BASE + "index.html", "_blank", "noopener");
+  });
+
+  bar.append(title, hint, search, goBtn, openBtn, closeBtn);
 
   /* ---- 主体：左边站点，右边已选栏 ---- */
   const body = document.createElement("div");
@@ -706,6 +737,9 @@ function renderPicks() {
     atlas.negEl.value = neg;
     atlas.negEl.dispatchEvent(new Event("input"));
   }
+
+  /* 加入 / 移出 / 清空 / 后端补数据，最后都会走到这里 —— 存这一处就够。 */
+  savePicks();
 }
 
 async function addPick({ codex, id, title, kind, tags, negative }) {

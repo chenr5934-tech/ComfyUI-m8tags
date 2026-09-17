@@ -984,8 +984,20 @@ function setupInline(node) {
   node.addWidget("button", syntaxButtonLabel(node), "", () => toggleSyntaxOnNode(node));
   node.__codexAtlasSyntaxBtn = (node.widgets || [])[before + 2] || null;
 
+  /* 比原生 CLIP 文本编码多挂了两个按钮 + 一个语法切换，原高度是按单个
+     文本框算的，加完就装不下。同样走绝对下限 —— 写成「再加 84」的话，
+     工作流每加载一次，节点就会再高一截。 */
   requestAnimationFrame(() => {
-    node.setSize?.([Math.max(node.size?.[0] || 0, 330), node.size?.[1] || 0]);
+    const minW = 330;
+    const minH = 290;
+    let needH = minH;
+    try {
+      const s = node.computeSize?.();
+      if (Array.isArray(s) && Number.isFinite(s[1])) needH = Math.max(minH, s[1] + 16);
+    } catch (err) { /* 算不出来就用下限兜着 */ }
+    const w = Math.max(node.size?.[0] || 0, minW);
+    const h = Math.max(node.size?.[1] || 0, needH);
+    node.setSize?.([w, h]);
     app.graph?.setDirtyCanvas(true, true);
   });
 }
@@ -1061,12 +1073,28 @@ function setupNode(node) {
     toast(`法典列表加载失败：${err.message}\n（随机抽词可能不可用，检查网络后重开节点）`, "error", 6000);
   });
 
-  /* 按钮和更宽的框需要更多空间 */
+  /* 节点尺寸：用「绝对下限」，不用「在当前高度上加多少」。
+   *
+   * 这个节点比普通节点多两个按钮，text 和 negative 又都是多行框，
+   * ComfyUI 给新节点的默认高度装不下 —— 两个按钮会被挤到看不见，
+   * 新用户得手动把节点往下拉才找得到「前往词典站寻找灵感」。
+   *
+   * 为什么不能写成 (当前高度 + 40)：加载已保存的工作流时，node.size
+   * 里已经包含这些控件的高度了，再加一次就会越加载越高。
+   *
+   * 算式（ComfyUI 默认行高）：标题 30 + text 6 行 132 + 两个按钮 56
+   * + syntax 28 + codex 28 + negative 74 + 留白 ≈ 380，取下限 400。
+   * computeSize() 能算出更大值就听它的 —— 不同前端版本行高不一样。 */
   requestAnimationFrame(() => {
-    const minW = 330;
-    const minH = (node.size?.[1] || 0) + 40;
+    const minW = 340;
+    const minH = 400;
+    let needH = minH;
+    try {
+      const s = node.computeSize?.();
+      if (Array.isArray(s) && Number.isFinite(s[1])) needH = Math.max(minH, s[1] + 16);
+    } catch (err) { /* 算不出来就用下限兜着 */ }
     const w = Math.max(node.size?.[0] || 0, minW);
-    const h = Math.max(node.size?.[1] || 0, minH);
+    const h = Math.max(node.size?.[1] || 0, needH);
     node.setSize?.([w, h]);
     app.graph?.setDirtyCanvas(true, true);
   });

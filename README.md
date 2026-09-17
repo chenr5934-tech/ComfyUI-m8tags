@@ -4,6 +4,8 @@
 
 ## 功能
 
+- **内置法典，开箱即用**：仓库自带一份完整的离线法典站点 `atlas/`（13 部法典、39111 条
+  词条，数据约 45 MB）。克隆下来放进 `custom_nodes/` 重启就能检索，**不需要另外准备站点**。
 - **随机提示词**：从本地法典随机抽一条填进文本框。
 - **语法切换**：`A1111 语法`（默认）／`原始 NAI 语法`。两版数据都是本地现成的，切换是原地重渲染，不丢失手改内容。
 - **站内小窗**：点「前往词典站寻找灵感」在 ComfyUI 页面内开浮层浏览离线站点（例图 + 检索 UI），不跳转新页面。
@@ -12,9 +14,26 @@
   （唯一例外：「我的图库」反查模型链接时会请求 civitai.com；网络不通就降级成
   「C 站没搜到」，不影响其余功能。）
 
-## 前置：离线站点数据
+## 法典数据：内置一份，可替换
 
-本插件不含词库数据，需要你自备一份**离线法典站点**（形如）：
+本仓库**内置了一份法典站点**，就在插件目录的 `atlas/` 下，开箱可用：
+
+```
+atlas/
+├── index.html  app.js  app.css  gallery.js  gallery-meta.js  converter.html
+├── data/
+│   ├── index.js          → window.QTC_META = [...]      （13 部法典的目录）
+│   └── <id>.js           → window.QTC_DATA["<id>"] = { meta, entries: [...] }
+├── images/               例图（**仓库里没有**，见下）
+└── self-image/           我的图库（**仓库里没有**，首次保存图片时自动生成）
+```
+
+`images/` 是刻意不提交的：完整例图有 1.6 GB / 4.5 万个文件，GitHub 装不下。
+缺少例图不影响任何功能 —— 卡片显示占位图，检索、复制、已选栏、推送到节点全都照常。
+`serve.py`（独立站点的启动脚本）也在里面，可以单独拿去用，见「我的图库」一节。
+
+想换成自己的站点，就按下面这个结构准备一份，然后用环境变量或 `config.json` 指过去
+（查找顺序见下一节，内置的 `atlas/` 优先级低于你自己指定的路径，不会被抢）：
 
 ```
 <站点目录>/
@@ -99,8 +118,11 @@ mklink /J "<ComfyUI>\custom_nodes\ComfyUI-CodexAtlas" "<本仓库克隆到的位
 
 ```
 站点卡片「＋ 加入已选栏」
-  → postMessage 到宿主（只传 codex + entry id）
-  → 宿主调 /codex_atlas/entry 补齐两个语法版本
+  → postMessage 到宿主
+      · 法典词条：只传 codex + entry id
+      · 我的图库条目：额外传 kind:"self" + 自带的 tags / negative
+  → 法典词条由宿主调 /codex_atlas/entry 补齐两个语法版本
+      （kind:"self" 跳过这一步 —— 它不在法典里，后端查不到）
   → 已选栏合并出正向 / 负向预览
   → 「推送到节点」写进节点的 text / negative
 ```
@@ -114,12 +136,13 @@ function hostedInPlugin() {
   try { return window.parent !== window; } catch (e) { return false; }
 }
 
-function postPick(entry) {
+function postPick(entry, extra) {
   try {
     window.parent.postMessage({
       source: 'codex-atlas', type: 'pick',
       codex: state.codexId || '', id: entry.id || '',
       title: entry.title || '', tags: entry.tags || '', negative: entry.n || '',
+      ...extra,                       // 「我的图库」用它带 kind / tags / negative 进来
     }, window.location.origin);
   } catch (e) {}
 }
@@ -138,6 +161,15 @@ if (hostedInPlugin()) {
 ```
 
 字段名（`state.codexId` / `entry.n` / `actions`）按你的站点实现调整。
+
+**契约细节**（主机侧 `addPick` 的实际行为，改站点时别踩）：
+
+- `kind` 为 `"self"` 表示**内容自带**，宿主不再请求后端：`tags` 直接当正向、`negative` 当负向，
+  两个语法版本用的是同一份文本。用来推「我的图库」这种不在法典里的条目。
+- `kind` 缺省或其它值是**法典词条**：宿主忽略 `tags` / `negative`，改为按 `codex` + `id`
+  调 `/codex_atlas/entry` 取权威内容（同时拿到 A1111 与 NAI 两版）。
+- 去重键是 `codex + id`，同一对只会进已选栏一次。
+- `codex` 和 `id` **都必须非空**，否则整条消息被丢弃（`kind:"self"` 也一样）。
 
 ## 我的图库
 
@@ -189,6 +221,14 @@ ComfyUI-CodexAtlas/
 │   └── store.py        本地数据读取（data/*.js 解析、raw 配对、路径解析）
 ├── js/
 │   └── codex_atlas.js  节点 UI、内置节点挂载、小窗与已选栏、语法切换
+├── atlas/              内置法典站点（可整体替换，见「法典数据」一节）
+│   ├── index.html  app.js  app.css  converter.html
+│   ├── gallery.js      我的图库 UI
+│   ├── gallery-meta.js 图内生成参数解析（A1111 / ComfyUI / NovelAI）
+│   ├── serve.py        独立启动用的零依赖后端（可选）
+│   ├── data/           13 部法典（约 45 MB，本仓库携带）
+│   ├── images/         例图目录（仓库不带，只有 README.txt）
+│   └── self-image/     我的图库（仓库不带，首次保存时生成）
 ├── tests/
 │   ├── test_convert.mjs      语法转换回归 28 例
 │   ├── test_plugin_load.py   按 ComfyUI 方式加载包 + 前后端契约一致性
@@ -225,7 +265,10 @@ python -m unittest discover -s tests -t .
 
 - 语法转换规则见 `js/codex_atlas.js` 顶部注释。本地两版数据都是现成的，转换器平时用不到，仅作为工具挂在 `window.__codexAtlas.convertTagsString` 供控制台调试。
 - 小窗和站点**同源**（都走 ComfyUI 的 `127.0.0.1:<端口>`），所以站内导航、搜索都正常，也不存在跨域限制。
-- 词条与例图版权归各自作者所有，本插件只做检索与索引，不附带任何数据。
+- 词条内容与例图版权归各自作者所有。本仓库只做检索与索引：**携带词条文本数据，
+  不携带任何例图**（`atlas/images/` 里只有一个说明文件）。
+- 内置的 `atlas/` 是给「拷进 `custom_nodes` 就能用」准备的；你自己的站点如果配置了
+  `atlasDir` / `CODEX_ATLAS_DIR`，优先级更高，不会跟内置那份打架。
 
 ## 许可
 

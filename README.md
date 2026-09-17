@@ -69,6 +69,47 @@ mklink /J "<ComfyUI>\custom_nodes\ComfyUI-CodexAtlas" "<本仓库克隆到的位
 
 重启 ComfyUI。改动生效方式：Python 侧要重启；`js/` 下改完刷新浏览器即可。
 
+## 完整例图
+
+仓库里**不带例图**：1636 MB / 44984 个文件，超出仓库该有的体积。例图单独发布成 Release 附件。
+
+**下载页**：https://github.com/chenr5934-tech/ComfyUI-m8tags/releases/tag/images-v1
+
+把下面这些包全部下下来（合计约 1.6 GB），然后**一律解压到插件的 `atlas/` 目录下**：
+
+| 包 | 大小 | 文件数 | 包含的法典 |
+| --- | --- | --- | --- |
+| `m8tags-images-part1.zip` | 400.5 MB | 11131 | suozhang_r18, jiegou_yuandian |
+| `m8tags-images-part2.zip` | 400.9 MB | 10673 | nai45_community_pack, artist_nai5_personal, artist_nai45_strings, enter_codex, mengshen_r18 |
+| `m8tags-images-part3.zip` | 399.7 MB | 10733 | artist_nai45_personal, community_ai_misc, qianteng, composition_style |
+| `m8tags-images-part4.zip` | 380.5 MB | 10761 | suozhang, nai5_community_pack, raven_composition, kisegaeningyou |
+| `m8tags-images-part5.zip` | 61.7 MB | 1686 | mengshen_pack |
+| `SHA256SUMS.txt` | 1 KB | — | 校验和 |
+
+包内路径固定为 `images/<codex>/<file>`，所以解压到 `atlas/` 之后**自然就是** `atlas/images/<codex>/...`，不用再手动挪。五个包互不依赖，下哪个解哪个都行，也可以只下你要的法典所在的包。
+
+例图是静态文件，解压完**刷新一下浏览器页面**就显示，不用重启 ComfyUI。
+
+**不装例图照样能用**：卡片位置显示占位图，检索、筛选、复制、已选栏、推送节点全部照常。例图只是卡片上的一张预览。
+
+校验（可选）：
+
+```
+certutil -hashfile m8tags-images-part1.zip SHA256
+```
+
+拿输出对着 `SHA256SUMS.txt` 里同名的行比。包是 `ZIP_STORED` 存的、没有二次压缩（JPEG 已经压过了），所以解压很快。
+
+**自己重新打包**（图库更新之后）：
+
+```
+python tools/pack-images.py   --src "<站点目录>/images" --out "<输出目录>"
+python tools/publish-images.py --dir "<输出目录>" --tag images-v2
+```
+
+第一个脚本按体积累计装箱，每包不超过 400 MB，同一个法典不拆散；顺带写出 `MANIFEST.json` 和 `SHA256SUMS.txt`。
+第二个脚本走 GitHub API 建 release 并上传附件，token 直接从 git 凭据管理器里取，已存在的附件会跳过 —— 传断了直接重跑即可。
+
 ## 配置数据目录
 
 插件按下面的顺序自动找站点，**第一个真的存在（含 `data/index.js`）的目录胜出**：

@@ -461,6 +461,10 @@ python -m unittest discover -s tests -t .
 
 `test_plugin_load.py` 会逐字比对 Python 节点契约与前端 JS 常量——两边差一个字符就是静默失效。
 
+`tests/site/` 是**站点侧**测试的备份副本（测 `atlas/` 那套站点本体，不是插件的 Python 侧），
+说明见 [tests/site/README.md](tests/site/README.md)。它们不能在本目录下直接跑——
+脚本按相对路径定位站点根，挪过来就对不上了；要跑请去站点目录，或显式把 URL 当参数传进去。
+
 ## 说明
 
 - 语法转换规则见 `js/codex_atlas.js` 顶部注释。本地两版数据都是现成的，转换器平时用不到，

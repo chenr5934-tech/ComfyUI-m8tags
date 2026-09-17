@@ -103,7 +103,7 @@ mklink /J "<ComfyUI>\custom_nodes\ComfyUI-CodexAtlas" "<本仓库克隆到的位
 
 **下载页**：https://github.com/chenr5934-tech/ComfyUI-m8tags/releases/tag/images-v1
 
-把下面这些包全部下下来（合计约 1.6 GB），然后**一律解压到插件的 `atlas/` 目录下**：
+把下面这些包全部下下来（合计约 1.6 GB）：
 
 | 包 | 大小 | 文件数 | 包含的法典 |
 | --- | --- | --- | --- |
@@ -114,10 +114,60 @@ mklink /J "<ComfyUI>\custom_nodes\ComfyUI-CodexAtlas" "<本仓库克隆到的位
 | `m8tags-images-part5.zip` | 61.7 MB | 1686 | mengshen_pack |
 | `SHA256SUMS.txt` | 1 KB | — | 校验和 |
 
-包内路径固定为 `images/<codex>/<file>`，所以解压到 `atlas/` 之后**自然就是** `atlas/images/<codex>/...`，
-不用再手动挪。五个包互不依赖，下哪个解哪个都行，也可以只下你要的法典所在的包。
+### 解压到 `atlas/`，不是 `atlas/images/`
 
+包里的第一层**已经是 `images/`** 了（实测第一条就是 `images/mengshen_pack/mengshen_pack-0259.jpg`），
+所以要把整个包解压到 **`atlas/`**，让 `images/` 这一层刚好落在它下面，最终长成：
+
+```
+ComfyUI-CodexAtlas/
+└── atlas/
+    ├── index.html
+    ├── data/                  词库（本来就有）
+    ├── images/                ← 解压出来的就是这个
+    │   ├── suozhang_r18/
+    │   ├── jiegou_yuandian/
+    │   └── …（共 16 个目录）
+    └── self-image/
+```
+
+**别解压到 `atlas/images/`** —— 那样会变成 `atlas/images/images/<codex>/`，站点找不到图。
+包名和目录名都带 `images`，这一步最容易搞反，对着上面的树看一眼就清楚了。
+
+**Windows 右键「全部解压」会多套一层。** 它是先建一个和压缩包同名的文件夹再往里放，
+于是你会得到 `atlas/m8tags-images-part1/images/...`。真这样了就进那一层，
+把里面的 `images` 整个拖到 `atlas/` 下 —— `atlas/images/` 已经存在也没关系，拖进去会自动合并。
+
+省事的做法是直接指定目标目录，一次解完（把 `<插件目录>` 换成你的实际路径，注意路径要加引号）：
+
+```powershell
+# PowerShell，在放 zip 的那个目录里跑，五个包一起解
+Get-ChildItem .\m8tags-images-part*.zip | ForEach-Object {
+  Expand-Archive -LiteralPath $_ -DestinationPath "<插件目录>\atlas" -Force
+}
+```
+
+```
+# 7-Zip：用「解压到当前位置」，不要用「解压到 m8tags-images-partN\」
+7z x m8tags-images-part1.zip -o"<插件目录>\atlas"
+```
+
+### 怎么确认放对了
+
+只解了 part1 的话，`atlas/images/jiegou_yuandian/` 里应该是 **265 张** `.jpg`：
+
+```powershell
+(Get-ChildItem "<插件目录>\atlas\images\jiegou_yuandian" -Filter *.jpg).Count   # 265
+```
+
+五个包全解完，`atlas/images/` 下会有 16 个目录、合计 44984 个文件。
+
+五个包互不依赖，只下一个、只解一个就照上面放；想省空间也可以只下你要的法典所在的包（对照上面的表格）。
 例图是静态文件，解压完**刷新一下浏览器页面**就显示，不用重启 ComfyUI。
+
+> 顺带说明：`images/` 下有 16 个目录，但站点只列 `data/index.js` 里登记的法典（当前 13 部）。
+> `artist_nai45_strings`、`community_ai_misc`、`mengshen_pack` 这三部的数据文件和例图都在，
+> 只是没登记进索引，所以站点里看不到这几部法典 —— 它们的图放在那儿也不占界面，属于正常现象。
 
 **不装例图照样能用**：卡片位置显示占位图，检索、筛选、复制、已选栏、推送节点全部照常。
 例图只是卡片上的一张预览。

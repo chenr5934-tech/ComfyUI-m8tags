@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NAI ⇄ SD/A1111 Tag 转换器 · 离线版</title>
+<script>
+(function () {
+  try {
+    var t = localStorage.getItem('qtc-theme');
+    if (t !== 'dark' && t !== 'light') t = window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    if (t === 'dark') document.documentElement.classList.add('dark');
+    document.documentElement.style.colorScheme = t;
+  } catch (e) {}
+})();
+</script>
+<style>
+:root {
+  --bg:#f6f7f4; --card:#fff; --line:#e7e9e2; --line2:#d8dbd2; --text:#23262d; --muted:#7a8191; --faint:#a8adba;
+  --accent:#15a06a; --accent-soft:rgba(21,160,106,.10); --danger:#e5484d; --tagbg:#f3f5f0;
+  --topbar:rgba(246,247,244,.92); --mono:"Cascadia Code","JetBrains Mono",Consolas,monospace;
+  --shadow:0 1px 2px rgba(20,30,20,.05),0 2px 10px rgba(20,30,20,.06);
+}
+html.dark {
+  --bg:#0f1115; --card:#171a21; --line:#252a35; --line2:#323947; --text:#d7dce4; --muted:#8a93a3; --faint:#5d6675;
+  --accent:#34d399; --accent-soft:rgba(52,211,153,.14); --danger:#f87171; --tagbg:#1b2029;
+  --topbar:rgba(15,17,21,.92);
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 2px 10px rgba(0,0,0,.25);
+}
+[hidden]{display:none!important}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;min-height:100vh;transition:background-color .25s,color .25s}
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 20px;background:var(--topbar);backdrop-filter:blur(10px);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:20;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:10px}
+.brand h1{font-size:16px;margin:0;font-weight:800}
+.brand-sub{color:var(--muted);font-size:12px;font-weight:400;margin-left:8px}
+.controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+select,button,textarea,input{font:inherit}
+select,button{background:var(--card);color:var(--text);border:1px solid var(--line2);border-radius:9px;padding:6px 10px;font-size:13px;cursor:pointer;outline:none}
+select:focus,button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.primary:hover{filter:brightness(.94)}
+.dir-tabs{display:flex;border:1px solid var(--line2);border-radius:9px;overflow:hidden}
+.dir-tabs button{border:none;border-radius:0;padding:6px 14px;background:var(--card)}
+.dir-tabs button.active{background:var(--accent);color:#fff}
+.wrap{max-width:1500px;margin:0 auto;padding:16px 20px 60px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:900px){.grid{grid-template-columns:1fr}}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);display:flex;flex-direction:column;min-height:420px}
+.panel-head{padding:10px 14px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.panel-title{font-weight:700;font-size:13.5px}
+.panel-tip{color:var(--muted);font-size:12px}
+textarea{width:100%;flex:1;resize:none;border:none;outline:none;background:transparent;color:var(--text);padding:12px 14px;font-family:var(--mono);font-size:12.5px;line-height:1.55}
+textarea::placeholder{color:var(--faint)}
+.out-pos{color:var(--text)}
+.out-neg{color:var(--danger)}
+.panel-foot{padding:8px 14px;border-top:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.stat{color:var(--muted);font-size:12px;margin-left:auto}
+.examples{display:flex;gap:6px;flex-wrap:wrap}
+.examples button{font-size:12px;padding:4px 10px}
+details.rules{margin-top:16px;background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}
+details.rules summary{padding:12px 16px;cursor:pointer;font-weight:700;font-size:13.5px;user-select:none}
+.rules-body{padding:0 16px 16px}
+.rule-desc{color:var(--muted);font-size:12.5px;margin:6px 0 10px;line-height:1.7}
+.rule-desc code{background:var(--tagbg);padding:1px 6px;border-radius:4px;font-family:var(--mono);font-size:12px}
+.rule-section{margin-top:12px}
+.rule-section>label{display:block;font-weight:700;font-size:12.5px;margin-bottom:6px;color:var(--text)}
+.rule-editor{width:100%;min-height:300px;resize:vertical;background:var(--tagbg);border:1px solid var(--line);border-radius:10px;color:var(--text);font-family:var(--mono);font-size:12px;line-height:1.5;padding:12px;outline:none;white-space:pre}
+.rule-actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center}
+.toast{position:fixed;bottom:60px;left:50%;transform:translateX(-50%);background:#23262d;color:#fff;padding:8px 18px;border-radius:999px;font-size:13px;z-index:99;box-shadow:0 6px 20px rgba(0,0,0,.25)}
+.link{color:var(--accent);text-decoration:none;font-size:12px;margin-left:auto}
+.link:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span style="color:var(--accent)">⇄</span>
+    <h1>NAI ⇄ SD/A1111 Tag 转换器<span class="brand-sub">离线版 · 双向 · 规则可编辑</span></h1>
+  </div>
+  <div class="controls">
+    <div class="dir-tabs">
+      <button id="dirToSD" class="active">NAI → SD</button>
+      <button id="dirToNAI">SD → NAI</button>
+    </div>
+    <label style="color:var(--muted);font-size:12px">规则</label>
+    <select id="ruleSelect" title="选择转换规则集"></select>
+    <button id="themeBtn" title="切换日/夜">🌙</button>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="grid">
+    <section class="panel">
+      <div class="panel-head">
+        <span class="panel-title" id="inTitle">输入 NAI 语法</span>
+        <span class="panel-tip" id="inTip"><code>负面: xxx</code> 行作为负面输入</span>
+      </div>
+      <textarea id="input" spellcheck="false" placeholder="例如：
+0.6::mignon,artist:quasarcake,{{jojo pose}},[ke-ta],-3::text::,year 2024
+或直接粘贴整条提示词…
+
+负面: nsfw, lowres, worst quality"></textarea>
+      <div class="panel-foot">
+        <div class="examples">
+          <button data-ex="w::基础">w::基础</button>
+          <button data-ex="花括号">花括号</button>
+          <button data-ex="方括号">方括号</button>
+          <button data-ex="负权重">负权重</button>
+          <button data-ex="artist">artist</button>
+          <button data-ex="复杂混合">复杂混合</button>
+        </div>
+        <button id="clearBtn">清空</button>
+        <span class="stat" id="inStat"></span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <span class="panel-title" id="outTitle">输出 · A1111 语法</span>
+        <span class="panel-tip" id="ruleName"></span>
+      </div>
+      <textarea id="outPos" class="out-pos" readonly spellcheck="false" placeholder="转换结果（正向）…"></textarea>
+      <textarea id="outNeg" class="out-neg" readonly spellcheck="false" placeholder="负面（负权重 tag 会移到此处）…"></textarea>
+      <div class="panel-foot">
+        <button id="copyPos" class="primary">复制正向</button>
+        <button id="copyNeg">复制负面</button>
+        <button id="copyAll">复制全部</button>
+        <span class="stat" id="outStat"></span>
+      </div>
+    </section>
+  </div>
+
+  <details class="rules" id="rulesPanel">
+    <summary>🔧 转换规则源码（正向 + 反向 —— 改完点「应用」立即生效，可保存到本机）</summary>
+    <div class="rules-body">
+      <div class="rule-desc" id="ruleDesc"></div>
+      <div class="rule-section">
+        <label>正向规则（NAI → SD/A1111）：函数 convert(text) 返回 {positive, negative}</label>
+        <textarea id="ruleEditor" class="rule-editor" spellcheck="false"></textarea>
+      </div>
+      <div class="rule-section">
+        <label>反向规则（SD/A1111 → NAI）：函数 reverse(text) 返回 {positive, negative}</label>
+        <textarea id="revRuleEditor" class="rule-editor" spellcheck="false"></textarea>
+      </div>
+      <div class="rule-actions">
+        <button id="applyRule" class="primary">应用规则</button>
+        <button id="saveRule">保存到本机</button>
+        <button id="resetRule">恢复内置默认</button>
+        <button id="copyRuleSrc">复制正向源码</button>
+        <button id="copyRevSrc">复制反向源码</button>
+        <span class="stat" id="ruleStat"></span>
+      </div>
+    </div>
+  </details>
+  <div style="margin-top:12px"><a class="link" href="index.html">← 返回法典图鉴</a></div>
+</div>
+
+<script>
+/* ============================================================
+ * 内置规则集 1：原站 novelai.quicktagcloud.com 的 nai-sd.js 官方语义（正向）
+ * ============================================================ */
+var SRC_SITE = `/* 原站 nai-sd.js（去 export 的浏览器版）—— 官方语义，勿轻改 */
+const NAI_WEIGHT_BASE = 1.05;
+
+function fmtSdWeight(weight) {
+  return parseFloat(weight.toFixed(3)).toString();
+}
+
+function convert(text) {
+  if (!text) return { positive: '', negative: '' };
+  const n = text.length;
+
+  const readRun = (pos, ch) => {
+    let count = 0;
+    while (text[pos + count] === ch) count += 1;
+    return count;
+  };
+  const cleanWeightContent = value => value.trim().replace(/[,\\s，]+$/, '').trim();
+
+  const parseNumericWeight = pos => {
+    const ch = text[pos];
+    if (ch !== '-' && ch !== '+' && (ch < '0' || ch > '9')) return null;
+    const empty = text.slice(pos).match(/^([+-]?\\d+(?:\\.\\d+)?)::(?=[,\\n]|$)/);
+    if (empty) return { out: '', pos: pos + empty[0].length };
+    const match = text.slice(pos).match(/^([+-]?\\d+(?:\\.\\d+)?)::([\\s\\S]*?)::/)
+      || text.slice(pos).match(/^([+-]?\\d+(?:\\.\\d+)?)::([^,\\n}\\]]*)/);
+    if (!match) return null;
+    const content = convert(match[2]).positive;
+    if (!content) return { out: '', pos: pos + match[0].length };
+    return {
+      out: '(' + content + ':' + fmtSdWeight(parseFloat(match[1])) + ')',
+      pos: pos + match[0].length,
+    };
+  };
+
+  const parseRange = (pos, stopClose = '') => {
+    let out = '';
+    while (pos < n) {
+      const ch = text[pos];
+
+      if (stopClose && ch === stopClose) {
+        const closeCount = readRun(pos, stopClose);
+        return { out, closeStart: pos, pos: pos + closeCount, closed: true, closeCount };
+      }
+
+      if (ch === '}' || ch === ']') {
+        pos += readRun(pos, ch);
+        continue;
+      }
+
+      const weighted = parseNumericWeight(pos);
+      if (weighted) {
+        out += weighted.out;
+        pos = weighted.pos;
+        continue;
+      }
+
+      if (ch === '{' || ch === '[') {
+        const group = parseBracketWeight(pos);
+        out += group.out;
+        pos = group.pos;
+        continue;
+      }
+
+      out += ch;
+      pos += 1;
+    }
+    return { out, closeStart: pos, pos, closed: false, closeCount: 0 };
+  };
+
+  const parseBracketWeight = pos => {
+    const open = text[pos];
+    const close = open === '{' ? '}' : ']';
+    const openCount = readRun(pos, open);
+    const inner = parseRange(pos + openCount, close);
+    if (!inner.closed) return { out: inner.out, pos: inner.pos };
+
+    const matchedCount = Math.min(openCount, inner.closeCount);
+    const nextPos = inner.closeStart + matchedCount;
+    const content = cleanWeightContent(inner.out);
+    if (!matchedCount || !content) return { out: '', pos: nextPos };
+    const direction = open === '{' ? 1 : -1;
+    return {
+      out: '(' + content + ':' + fmtSdWeight(Math.pow(NAI_WEIGHT_BASE, direction * matchedCount)) + ')',
+      pos: nextPos,
+    };
+  };
+
+  const result = parseRange(0).out;
+  return { positive: result, negative: '' };
+}
+`;
+
+/* ============================================================
+ * 内置规则集 1 反向：A1111 → NAI
+ * 语义参照 Greasyfork「NovelAI Prompt Converter」的 comfyuiToNovelAI：
+ *   (x) → 1.1::x::；((x)) → 1.21::x::；(x:1.2) → 1.2::x::；嵌套组权重相乘
+ *   \(…\) 字面括号还原；组内括号转 {x}；[x] 原样保留（NAI 削弱语法兼容）
+ *   w<0 的组输出到 negative
+ * ============================================================ */
+var SRC_SITE_REV = `/* 原站风格反向（Greasyfork comfyuiToNovelAI 语义） */
+function resolveImplicitParens(prompt) {
+  let result = prompt;
+  const resolved = new Map();
+  let tokenId = 0;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    result = result.replace(/\\(([^()]+)\\)/g, (_m, content) => {
+      const tokenMatch = content.match(/^__RWP(\\d+)__$/);
+      if (tokenMatch) {
+        const entry = resolved.get(content);
+        const newToken = '__RWP' + tokenId++ + '__';
+        resolved.set(newToken, { tag: entry.tag, weight: entry.weight * 1.1 });
+        resolved.delete(content);
+        changed = true;
+        return newToken;
+      }
+      const tokenWeightMatch = content.match(/^__RWP(\\d+)__:([\\d.-]+)$/);
+      if (tokenWeightMatch) {
+        const entry = resolved.get('__RWP' + tokenWeightMatch[1] + '__');
+        const newToken = '__RWP' + tokenId++ + '__';
+        resolved.set(newToken, { tag: entry.tag, weight: entry.weight * parseFloat(tokenWeightMatch[2]) });
+        resolved.delete('__RWP' + tokenWeightMatch[1] + '__');
+        changed = true;
+        return newToken;
+      }
+      if (/__RWP\\d+__/.test(content)) return _m;
+      const explicitMatch = content.match(/^(.+):([\\d.-]+)$/);
+      if (explicitMatch) {
+        const token = '__RWP' + tokenId++ + '__';
+        resolved.set(token, { tag: explicitMatch[1], weight: parseFloat(explicitMatch[2]) });
+        changed = true;
+        return token;
+      }
+      const token = '__RWP' + tokenId++ + '__';
+      resolved.set(token, { tag: content, weight: 1.1 });
+      changed = true;
+      return token;
+    });
+  }
+  for (const [token, { tag, weight }] of resolved) {
+    const w = parseFloat(weight.toFixed(3)).toString();
+    result = result.replace(token, '(' + tag + ':' + w + ')');
+  }
+  return result;
+}
+
+function reverse(text) {
+  if (!text || !text.trim()) return { positive: '', negative: '' };
+  let p = String(text);
+  p = p.replace(/\\\\\\(/g, '__ESC_OPEN__').replace(/\\\\\\)/g, '__ESC_CLOSE__');
+  /* [x] 整体保护：避免括号组处理误伤方括号内部 */
+  const brks = [];
+  p = p.replace(/\\[([^\\[\\]]+)\\]/g, (_m, c) => { brks.push(c); return '__BRK' + (brks.length - 1) + '__'; });
+  p = resolveImplicitParens(p);
+  const elements = p.split(/(?<!\\\\)([,()])/).map(el => el.trim()).filter(Boolean);
+  const parts = [];
+  const sink = [];
+  let i = 0;
+  while (i < elements.length) {
+    const el = elements[i];
+    if (el === '(') {
+      i++;
+      let content = '', bal = 1;
+      while (i < elements.length) {
+        const sub = elements[i];
+        if (sub === '(') bal++;
+        else if (sub === ')') { bal--; if (bal === 0) { i++; break; } }
+        content += sub;
+        i++;
+      }
+      if (content) {
+        let weight = 1.1, tagsStr = content;
+        const wm = content.match(/^(.*):([\\d.-]+)$/);
+        if (wm) { weight = parseFloat(wm[2]); tagsStr = wm[1]; }
+        tagsStr = tagsStr.replace(/\\(([^()]+)(?::[\\d.-]+)?\\)/g, (_m, inner) => '{' + inner + '}');
+        if (tagsStr) {
+          const w = parseFloat(weight.toFixed(3)).toString();
+          if (weight < 0) sink.push(w + '::' + tagsStr + '::');
+          else if (weight === 1) parts.push(tagsStr);
+          else parts.push(w + '::' + tagsStr + '::');
+        }
+      }
+    } else if (el === ',') { parts.push(','); i++; }
+    else { if (el) parts.push(el); i++; }
+  }
+  let out = parts.join('');
+  out = out.replace(/__BRK(\\d+)__/g, (_m, i) => '[' + brks[+i] + ']');
+  out = out.replace(/__ESC_OPEN__/g, '(').replace(/__ESC_CLOSE__/g, ')');
+  out = out.split(',').map(s => s.trim()).filter(Boolean).join(', ');
+  return { positive: out, negative: sink.join(', ') };
+}
+`;
+
+/* ============================================================
+ * 内置规则集 2：完整版（法典批量转换同款语义，正向）
+ * ============================================================ */
+var SRC_FULL = `/* 完整版（与 codexes-sdxl 批量转换同款语义）
+ * 规则：
+ *   w::c:: (w>0) → (c:w)；w<0 → 移入 negative；::c:: → c（权重1）
+ *   {c} n 层 → (c:1.05^n)；[c] n 层 → (c:0.95^n)（递归平衡，层数不匹配取 min）
+ *   w:tag: 单冒号 → (tag:w)；artist:xxx（含笔误）→ xxx
+ *   (x) / (x:w)（词条起始平衡组）→ 保留；标签名内字面括号 → \\(…\\)
+ *   | 分块 → , ；带符号纯数字（权重残留）丢弃；无符号纯数字保留（数字画师 ID） */
+const ARTIST_PREFIX_RE = /^\\s*(?:artist|artists|aritst|arits|atrist|artistt|artis|artsit|atist)\\s*:/i;
+
+function fmtWeight(w) {
+  const s = w.toFixed(2).replace(/0+$/, '').replace(/\\.$/, '');
+  return s === '-0' ? '0' : s;
+}
+function stripArtist(s) { return s.replace(ARTIST_PREFIX_RE, ''); }
+function stripArtistPerTag(s) { return String(s).split(',').map(p => stripArtist(p)).join(','); }
+function escapeParens(s) { return s.replace(/\\(/g, '\\\\(').replace(/\\)/g, '\\\\)'); }
+
+function findMatchingClose(s, open, closeChar) {
+  let bal = 1, i = open + 1;
+  const isEsc = k => s[k] === '\\\\' && k + 1 < s.length && '(){}[]'.includes(s[k + 1]);
+  while (i < s.length && bal > 0) {
+    if (isEsc(i)) { i += 2; continue; }
+    if (s[i] === '(' || s[i] === '[' || s[i] === '{') {
+      if (s[i] === closeChar) bal++;
+      else if (s[i] === (closeChar === ')' ? '(' : closeChar === ']' ? '[' : '{')) bal++;
+    }
+    else if (s[i] === ')' || s[i] === ']' || s[i] === '}') { if (s[i] === closeChar) bal--; }
+    i++;
+  }
+  return bal === 0 ? i - 1 : -1;
+}
+
+function splitTopLevel(s) {
+  const parts = []; let depth = 0, cur = '';
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '\\\\' && i + 1 < s.length && '()'.includes(s[i + 1])) { cur += ch + s[i + 1]; i++; continue; }
+    if (ch === '(') depth++;
+    else if (ch === ')') depth = Math.max(0, depth - 1);
+    if (ch === ',' && depth === 0) { parts.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  parts.push(cur);
+  return parts;
+}
+
+function convertParens(s, allowLeadingGroup = true) {
+  let out = '', i = 0;
+  while (i < s.length) {
+    const ch = s[i];
+    if (ch === '\\\\' && (s[i + 1] === '(' || s[i + 1] === ')')) { out += ch + s[i + 1]; i += 2; continue; }
+    if (ch === '(') {
+      let k = i - 1; while (k >= 0 && /\\s/.test(s[k])) k--;
+      const atTokenStart = k < 0 || s[k] === ',';
+      const close = findMatchingClose(s, i, ')');
+      if (close >= 0 && allowLeadingGroup && atTokenStart) {
+        out += '(' + convertParens(stripArtistPerTag(s.slice(i + 1, close)), true) + ')';
+        i = close + 1; continue;
+      }
+      if (close >= 0) {
+        out += '\\\\(' + convertParens(s.slice(i + 1, close), false) + '\\\\)';
+        i = close + 1; continue;
+      }
+      out += '\\\\('; i++; continue;
+    }
+    if (ch === ')') { out += '\\\\)'; i++; continue; }
+    out += ch; i++;
+  }
+  return out;
+}
+
+function convertBraces(s) {
+  let out = '', i = 0;
+  while (i < s.length) {
+    const ch = s[i];
+    if (ch === '{' || ch === '[') {
+      const close = ch === '{' ? '}' : ']';
+      let run = 0; while (s[i + run] === ch) run++;
+      let matched = -1, usedRun = 0;
+      for (let r = run; r >= 1; r--) {
+        let depth = r, j = i + run;
+        while (j < s.length && depth > 0) {
+          if (s[j] === '\\\\' && j + 1 < s.length && '(){}[]'.includes(s[j + 1])) { j += 2; continue; }
+          if (s[j] === ch) depth++;
+          else if (s[j] === close) { depth--; if (depth === 0) { matched = j; break; } }
+          j++;
+        }
+        if (matched >= 0) { usedRun = r; break; }
+      }
+      if (matched >= 0) {
+        let inner = s.slice(i + usedRun, matched);
+        inner = inner.replace(/^([+-]?[\\d.]+):?([^:]*):$/, (_m, w, tag) => {
+          const t = stripArtist(tag.trim());
+          return t ? '(' + escapeParens(t) + ':' + fmtWeight(parseFloat(w)) + ')' : '';
+        });
+        inner = convertBraces(inner);
+        const weight = fmtWeight(Math.pow(ch === '{' ? 1.05 : 0.95, usedRun));
+        out += '(' + stripArtistPerTag(inner) + ':' + weight + ')';
+        i = matched + 1; continue;
+      }
+      i += run; continue;
+    }
+    if (ch === '}' || ch === ']') { i++; continue; }
+    out += ch; i++;
+  }
+  return out;
+}
+
+function processPlain(s, sink) {
+  s = String(s || '').trim();
+  if (!s) return '';
+  s = s.replace(/([+-]?[\\d.]+):([^:(),]+):/g, (_m, w, tag) => {
+    const wv = parseFloat(w), t = stripArtist(tag.trim());
+    if (!t) return '';
+    if (wv < 0) { sink.push(t); return ''; }
+    return '(' + escapeParens(t) + ':' + fmtWeight(wv) + ')';
+  });
+  s = convertBraces(s);
+  const out = splitTopLevel(s).map(p => p.trim())
+    .map(p => stripArtist(convertParens(stripArtistPerTag(p), true)))
+    .map(p => p.trim())
+    .filter(p => p && !/^[+-]\\d+(?:\\.\\d+)?$/.test(p));
+  return out.join(', ');
+}
+
+function group(content, w, sink) {
+  const c = processPlain(content, sink);
+  if (!c) return '';
+  const wv = parseFloat(w);
+  if (wv < 0) { sink.push(c); return ''; }
+  if (wv > 0 && wv !== 1) return '(' + c + ':' + fmtWeight(wv) + ')';
+  return c;
+}
+
+function processSegment(raw, sink) {
+  let s = String(raw || '').trim();
+  if (!s) return '';
+  s = s.replace(/\\\\\\\\/g, '\\\\');
+  /* w::c:: 组：闭合 :: 前不能是数字（避免吞掉下一个权重的开头）、后跟分隔符（手写直觉语义） */
+  s = s.replace(/([+-]?[\\d.]+)::((?:(?!::).)*?)(?<!\\d)::(?=[,\\n|]|$)/g, (_m, w, content) => group(content, w, sink));
+  s = s.replace(/::((?:(?!::).)*?)(?<!\\d)::(?=[,\\n|]|$)/g, (_m, content) => group(content, '', sink));
+  s = s.replace(/([+-]?[\\d.]+)::([^,]+)/g, (_m, w, content) => {
+    if (!content.replace(/:/g, '').trim()) return '';
+    return group(content, w, sink);
+  });
+  s = s.replace(/::/g, '');
+  return processPlain(s, sink);
+}
+
+function convert(text) {
+  const sink = [];
+  const chunks = String(text || '').split('|').map(chunk => processSegment(chunk, sink));
+  const positive = chunks
+    .map(c => c.split(',').map(t => t.trim()).filter(Boolean).join(', '))
+    .filter(Boolean).join(', ');
+  const negative = sink
+    .map(t => t.split(',').map(x => x.trim()).filter(Boolean).join(', '))
+    .filter(Boolean).join(', ');
+  return { positive, negative };
+}
+`;
+
+/* ============================================================
+ * 内置规则集 2 反向：A1111 → NAI（与完整版正向对称）
+ *   (x) → 1.1::x::；((x)) → 1.21::x::；(x:w) → w::x::；嵌套权重相乘
+ *   [x]（A1111 削弱 ×0.909）→ 0.91::x::；\(…\) 字面括号还原
+ *   w<0 的组输出到 negative；组内括号转 {x}
+ * ============================================================ */
+var SRC_FULL_REV = `/* 完整版反向（与正向对称） */
+function resolveImplicitParens(prompt) {
+  let result = prompt;
+  const resolved = new Map();
+  let tokenId = 0;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    result = result.replace(/\\(([^()]+)\\)/g, (_m, content) => {
+      const tokenMatch = content.match(/^__RWP(\\d+)__$/);
+      if (tokenMatch) {
+        const entry = resolved.get(content);
+        const newToken = '__RWP' + tokenId++ + '__';
+        resolved.set(newToken, { tag: entry.tag, weight: entry.weight * 1.1 });
+        resolved.delete(content);
+        changed = true;
+        return newToken;
+      }
+      const tokenWeightMatch = content.match(/^__RWP(\\d+)__:([\\d.-]+)$/);
+      if (tokenWeightMatch) {
+        const entry = resolved.get('__RWP' + tokenWeightMatch[1] + '__');
+        const newToken = '__RWP' + tokenId++ + '__';
+        resolved.set(newToken, { tag: entry.tag, weight: entry.weight * parseFloat(tokenWeightMatch[2]) });
+        resolved.delete('__RWP' + tokenWeightMatch[1] + '__');
+        changed = true;
+        return newToken;
+      }
+      if (/__RWP\\d+__/.test(content)) return _m;
+      const explicitMatch = content.match(/^(.+):([\\d.-]+)$/);
+      if (explicitMatch) {
+        const token = '__RWP' + tokenId++ + '__';
+        resolved.set(token, { tag: explicitMatch[1], weight: parseFloat(explicitMatch[2]) });
+        changed = true;
+        return token;
+      }
+      const token = '__RWP' + tokenId++ + '__';
+      resolved.set(token, { tag: content, weight: 1.1 });
+      changed = true;
+      return token;
+    });
+  }
+  for (const [token, { tag, weight }] of resolved) {
+    const w = parseFloat(weight.toFixed(3)).toString();
+    result = result.replace(token, '(' + tag + ':' + w + ')');
+  }
+  return result;
+}
+
+function fmtW2(w) {
+  const s = w.toFixed(3).replace(/0+$/, '').replace(/\\.$/, '');
+  return s === '-0' ? '0' : s;
+}
+
+function reverse(text) {
+  if (!text || !text.trim()) return { positive: '', negative: '' };
+  let s = String(text);
+  /* 0. [x] 整体保护：避免括号组处理误伤方括号内部 */
+  const brks = [];
+  s = s.replace(/\\[([^\\[\\]]+)\\]/g, (_m, c) => { brks.push(c); return '__BRK' + (brks.length - 1) + '__'; });
+  /* 1. 字面括号保护 */
+  s = s.replace(/\\\\\\(/g, '\\u0001').replace(/\\\\\\)/g, '\\u0002');
+  /* 2. 隐式权重显式化 */
+  s = resolveImplicitParens(s);
+  /* 3. (x:w) 组 → w::x:: */
+  const sink = [];
+  s = s.replace(/\\(([^()]*?)(?::([\\d.-]+))?\\)/g, (_m, content, w) => {
+    const weight = w === undefined ? 1.1 : parseFloat(w);
+    let inner = content.replace(/\\(([^()]+)\\)/g, (_m2, c2) => '{' + c2 + '}');
+    if (!inner) return '';
+    if (weight < 0) { sink.push(fmtW2(weight) + '::' + inner + '::'); return ''; }
+    if (weight === 1) return inner;
+    return fmtW2(weight) + '::' + inner + '::';
+  });
+  /* 4. 还原 [x] → A1111 削弱 0.909 → NAI 0.91 */
+  s = s.replace(/__BRK(\\d+)__/g, (_m, i) => '[' + brks[+i] + ']');
+  s = s.replace(/\\[([^\\[\\]]+)\\]/g, (_m, content) => '0.91::' + content + '::');
+  /* 5. 还原字面括号 */
+  s = s.replace(/\\u0001/g, '(').replace(/\\u0002/g, ')');
+  const out = s.split(',').map(p => p.trim()).filter(Boolean).join(', ');
+  return { positive: out, negative: sink.join(', ') };
+}
+`;
+
+/* ============================================================
+ * 页面逻辑
+ * ============================================================ */
+const RULES = {
+  site: {
+    name: '原站 nai-sd.js 官方语义',
+    desc: '正向：来自 novelai.quicktagcloud.com 的 nai-sd.js（原始脚本）。<code>{tag}</code>→<code>(tag:1.05)</code>、<code>{{tag}}</code>→<code>(tag:1.103)</code>、<code>[tag]</code>→<code>(tag:0.952)</code>、<code>1.3::tag::</code>→<code>(tag:1.3)</code>；递归解析，未闭合括号只丢括号。<br>反向：Greasyfork「NovelAI Prompt Converter」的 comfyuiToNovelAI 语义。<code>(x)</code>→<code>1.1::x::</code>、<code>(x:1.2)</code>→<code>1.2::x::</code>、嵌套权重相乘、<code>[x]</code> 原样保留。',
+    src: SRC_SITE,
+    revSrc: SRC_SITE_REV,
+  },
+  full: {
+    name: '完整版（法典转换同款）',
+    desc: '正向：与 codexes-sdxl 批量转换完全相同。<code>w::c::</code>→<code>(c:w)</code>、负权重移入负面、<code>{c}</code>→<code>(c:1.05^n)</code>、<code>[c]</code>→<code>(c:0.95^n)</code>、<code>w:tag:</code>→<code>(tag:w)</code>、<code>artist:xxx</code>（含笔误）剥离、字面括号转义、<code>(x)/(x:w)</code>保留、<code>|</code>→<code>,</code>。<br>反向：<code>(x:w)</code>→<code>w::x::</code>、<code>[x]</code>（×0.909）→<code>0.91::x::</code>、嵌套相乘、字面括号还原、负权重进负面。',
+    src: SRC_FULL,
+    revSrc: SRC_FULL_REV,
+  },
+};
+
+const $ = id => document.getElementById(id);
+const STORE_RULE = 'qtc-conv-rule';
+const STORE_REV_RULE = 'qtc-conv-rev-rule';
+const STORE_RULE_NAME = 'qtc-conv-rule-name';
+
+let currentRule = null; /* {name, desc, src, revSrc, convert, reverse} */
+let direction = 'toSD'; /* toSD | toNAI */
+
+function compileFn(src, fnName) {
+  const factory = new Function(src + '\n;return typeof ' + fnName + ' === "function" ? ' + fnName + ' : null;');
+  const fn = factory();
+  if (typeof fn !== 'function') throw new Error('源码中未找到 ' + fnName + '(text) 函数');
+  return text => {
+    const r = fn(String(text || ''));
+    if (typeof r === 'string') return { positive: r, negative: '' };
+    return { positive: String(r.positive || ''), negative: String(r.negative || '') };
+  };
+}
+
+function applyRule(rule) {
+  currentRule = {
+    ...rule,
+    convert: compileFn(rule.src, 'convert'),
+    reverse: compileFn(rule.revSrc, 'reverse'),
+  };
+  $('ruleName').textContent = rule.name;
+  $('ruleDesc').innerHTML = rule.desc;
+  $('ruleEditor').value = rule.src;
+  $('revRuleEditor').value = rule.revSrc;
+  $('ruleStat').textContent = '';
+  convertNow();
+}
+
+/* 拆分负面行：`负面: xxx` / `negative: xxx` 开头的行进负面输入 */
+function splitNegLines(text) {
+  const pos = [], neg = [];
+  for (const line of String(text || '').split('\n')) {
+    const m = line.match(/^\s*(?:负面|负面：|negative)\s*[:：]\s*(.*)$/i);
+    if (m) neg.push(m[1]);
+    else pos.push(line);
+  }
+  return { pos: pos.join('\n').trim(), neg: neg.join('\n').trim() };
+}
+
+function convertNow() {
+  const { pos, neg } = splitNegLines($('input').value);
+  const t0 = performance.now();
+  let result;
+  try {
+    if (direction === 'toSD') {
+      const r1 = currentRule.convert(pos);
+      const r2 = currentRule.convert(neg);
+      result = { positive: r1.positive, negative: [r1.negative, r2.positive].filter(Boolean).join(', ') };
+    } else {
+      const r1 = currentRule.reverse(pos);
+      const r2 = currentRule.reverse(neg);
+      result = { positive: r1.positive, negative: [r1.negative, r2.positive].filter(Boolean).join(', ') };
+    }
+  } catch (e) {
+    $('outPos').value = '';
+    $('outNeg').value = '';
+    $('outStat').textContent = '转换出错：' + e.message;
+    return;
+  }
+  const ms = (performance.now() - t0).toFixed(1);
+  $('outPos').value = result.positive;
+  $('outNeg').value = result.negative;
+  const posCount = result.positive ? result.positive.split(',').length : 0;
+  const negCount = result.negative ? result.negative.split(',').length : 0;
+  $('inStat').textContent = $('input').value.trim() ? `输入 ${$('input').value.trim().length} 字符` : '';
+  $('outStat').textContent = `正向 ${posCount} tag${negCount ? ` · 负面 ${negCount} tag` : ''} · ${ms}ms`;
+}
+
+function toast(msg) {
+  let t = $('toast');
+  if (!t) { t = document.createElement('div'); t.className = 'toast'; t.id = 'toast'; document.body.appendChild(t); }
+  t.textContent = msg;
+  t.style.display = 'block';
+  clearTimeout(t._tm);
+  t._tm = setTimeout(() => { t.style.display = 'none'; }, 1600);
+}
+
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch (e) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.cssText = 'position:fixed;opacity:0';
+      document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); ta.remove();
+      return true;
+    } catch (e2) { return false; }
+  }
+}
+
+const EXAMPLES = {
+  'w::基础': '0.6::mignon,artist:quasarcake,artist:houkisei,40hara::,piromizu,year 2024',
+  '花括号': '{{{{{{araki hirohiko(style)}}}}}},{{jojo pose}},{{year 2024}}',
+  '方括号': '[[[[[artist:baffu]]]]],[[artist:wagashi (dagashiya)]]',
+  '负权重': '-2::flat color::,-1::artist collaboration::,0.9::sincos::,1girl',
+  'artist': 'artist:ask_(askzy),artist:doremi (doremi4704),artist:7010,artist:yoneyama_mai',
+  '复杂混合': '1.5::amazing quality,4k,very aesthetic,absurdres::,1.5::masterpiece::,{{artist:dsmile}},[0.3:rei (sanbonzakura):],-5::text:: | -2::multiple views:: | 0.8::wolrero,artist:ronna::',
+};
+const EXAMPLES_REV = {
+  'w::基础': '(mignon:0.6), quasarcake, houkisei, 40hara, piromizu, year 2024',
+  '花括号': '(araki hirohiko(style):1.34), (jojo pose:1.1), (year 2024:1.1)',
+  '方括号': '(baffu:0.77), [wagashi (dagashiya)]',
+  '负权重': '(flat color:-2), (artist collaboration:-1), (sincos:0.9), 1girl',
+  'artist': 'ask_(askzy), doremi (doremi4704), 7010, yoneyama_mai',
+  '复杂混合': '(amazing quality, 4k, very aesthetic, absurdres:1.5), (masterpiece:1.5), (dsmile:1.1), ((rei (sanbonzakura):0.3):0.95), (wolrero, ronna:0.8)',
+};
+
+function setDirection(dir) {
+  direction = dir;
+  $('dirToSD').classList.toggle('active', dir === 'toSD');
+  $('dirToNAI').classList.toggle('active', dir === 'toNAI');
+  const toSD = dir === 'toSD';
+  $('inTitle').textContent = toSD ? '输入 NAI 语法' : '输入 SD/A1111 语法';
+  $('outTitle').textContent = toSD ? '输出 · A1111 语法' : '输出 · NAI 语法';
+  $('input').placeholder = toSD
+    ? '例如：\n0.6::mignon,{{jojo pose}},[ke-ta],-3::text::,year 2024\n\n负面: nsfw, lowres'
+    : '例如：\n(mignon:0.6), (jojo pose:1.1), (ke-ta:0.95), [bad], ask_\\(askzy\\)\n\n负面: nsfw, lowres';
+  convertNow();
+}
+
+function init() {
+  /* 规则选择 */
+  const sel = $('ruleSelect');
+  for (const [key, r] of Object.entries(RULES)) {
+    const opt = document.createElement('option');
+    opt.value = key;
+    opt.textContent = r.name;
+    sel.appendChild(opt);
+  }
+  sel.onchange = () => selectRule(sel.value);
+
+  /* 恢复用户保存的自定义规则，否则用内置 */
+  let savedSrc = null, savedRevSrc = null, savedName = null;
+  try {
+    savedSrc = localStorage.getItem(STORE_RULE);
+    savedRevSrc = localStorage.getItem(STORE_REV_RULE);
+    savedName = localStorage.getItem(STORE_RULE_NAME);
+  } catch (e) {}
+  if (savedSrc && savedRevSrc) {
+    const custom = { name: savedName || '自定义规则', desc: '你保存的自定义规则（改动后点「应用」生效，本页面 localStorage 保存）。', src: savedSrc, revSrc: savedRevSrc };
+    RULES.custom = custom;
+    sel.appendChild(new Option(custom.name, 'custom'));
+    sel.value = 'custom';
+    applyRule(custom);
+  } else {
+    sel.value = 'full';
+    applyRule(RULES.full);
+  }
+
+  /* 方向切换 */
+  $('dirToSD').onclick = () => setDirection('toSD');
+  $('dirToNAI').onclick = () => setDirection('toNAI');
+
+  /* 输入即转（防抖） */
+  let debounce = null;
+  $('input').addEventListener('input', () => {
+    clearTimeout(debounce);
+    debounce = setTimeout(convertNow, 120);
+  });
+  $('clearBtn').onclick = () => { $('input').value = ''; convertNow(); };
+
+  /* 示例：随方向切换 */
+  document.querySelectorAll('.examples button').forEach(btn => {
+    btn.onclick = () => {
+      $('input').value = (direction === 'toSD' ? EXAMPLES : EXAMPLES_REV)[btn.dataset.ex] || '';
+      convertNow();
+    };
+  });
+
+  /* 复制 */
+  $('copyPos').onclick = async () => toast((await copyText($('outPos').value)) ? '已复制正向' : '复制失败');
+  $('copyNeg').onclick = async () => toast((await copyText($('outNeg').value)) ? '已复制负面' : '复制失败');
+  $('copyAll').onclick = async () => {
+    const t = [$('outPos').value, $('outNeg').value ? '负面: ' + $('outNeg').value : ''].filter(Boolean).join('\n');
+    toast((await copyText(t)) ? '已复制全部' : '复制失败');
+  };
+
+  /* 规则操作 */
+  $('applyRule').onclick = () => {
+    try {
+      const src = $('ruleEditor').value;
+      const revSrc = $('revRuleEditor').value;
+      compileFn(src, 'convert'); /* 先验证能编译 */
+      compileFn(revSrc, 'reverse');
+      const name = currentRule.name === '自定义规则' ? currentRule.name : currentRule.name + '（已修改）';
+      applyRule({ name, desc: currentRule.desc, src, revSrc });
+      if (RULES.custom) { RULES.custom.src = src; RULES.custom.revSrc = revSrc; }
+      toast('规则已应用（正向+反向）');
+    } catch (e) {
+      toast('规则编译失败：' + e.message);
+      $('ruleStat').textContent = '编译失败：' + e.message;
+    }
+  };
+  $('saveRule').onclick = () => {
+    try {
+      compileFn($('ruleEditor').value, 'convert');
+      compileFn($('revRuleEditor').value, 'reverse');
+      localStorage.setItem(STORE_RULE, $('ruleEditor').value);
+      localStorage.setItem(STORE_REV_RULE, $('revRuleEditor').value);
+      localStorage.setItem(STORE_RULE_NAME, currentRule.name);
+      if (!RULES.custom) { RULES.custom = { name: currentRule.name, desc: currentRule.desc, src: $('ruleEditor').value, revSrc: $('revRuleEditor').value }; $('ruleSelect').appendChild(new Option(currentRule.name, 'custom')); }
+      $('ruleSelect').value = 'custom';
+      toast('已保存到本机（下次打开自动加载）');
+    } catch (e) {
+      toast('保存失败：' + e.message);
+    }
+  };
+  $('resetRule').onclick = () => {
+    try { localStorage.removeItem(STORE_RULE); localStorage.removeItem(STORE_REV_RULE); localStorage.removeItem(STORE_RULE_NAME); } catch (e) {}
+    delete RULES.custom;
+    const sel2 = $('ruleSelect');
+    const customOpt = [...sel2.options].find(o => o.value === 'custom');
+    if (customOpt) customOpt.remove();
+    sel2.value = 'full';
+    applyRule(RULES.full);
+    toast('已恢复内置默认（完整版）');
+  };
+  $('copyRuleSrc').onclick = async () => toast((await copyText($('ruleEditor').value)) ? '已复制正向源码' : '复制失败');
+  $('copyRevSrc').onclick = async () => toast((await copyText($('revRuleEditor').value)) ? '已复制反向源码' : '复制失败');
+
+  /* 主题 */
+  const applyThemeIcon = () => {
+    const dark = document.documentElement.classList.contains('dark');
+    $('themeBtn').textContent = dark ? '☀️' : '🌙';
+  };
+  $('themeBtn').onclick = () => {
+    const dark = document.documentElement.classList.toggle('dark');
+    document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+    try { localStorage.setItem('qtc-theme', dark ? 'dark' : 'light'); } catch (e) {}
+    applyThemeIcon();
+  };
+  applyThemeIcon();
+
+  convertNow();
+}
+
+function selectRule(key) {
+  const r = RULES[key];
+  if (r) applyRule(r);
+}
+
+init();
+</script>
+</body>
+</html>

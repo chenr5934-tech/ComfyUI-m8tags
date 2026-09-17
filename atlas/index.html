@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SDXL / Animagine 法典检索 · 本地版</title>
+<script>
+/* 主题先行：在样式加载前决定日/夜，避免闪白/闪黑；记住用户选择，默认跟随系统 */
+(function () {
+  try {
+    var t = localStorage.getItem('qtc-theme');
+    if (t !== 'dark' && t !== 'light') {
+      t = window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    if (t === 'dark') document.documentElement.classList.add('dark');
+    document.documentElement.style.colorScheme = t;
+  } catch (e) {}
+})();
+</script>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-dot">◆</span>
+    <h1>法典图鉴<span class="brand-sub">本地离线版 · SDXL / Animagine · A1111 语法</span></h1>
+  </div>
+  <button id="selfBtn" class="self-entry" title="上传自己生成的图片，解析出底模 / LoRA / 提示词，并查 C 站链接">＋ 我的图库</button>
+  <div class="controls">
+    <select id="codexSelect" title="选择法典"></select>
+    <input id="search" type="search" placeholder="搜索词条 / tag（多词空格分隔，/ 聚焦，Esc 清除）" autocomplete="off" spellcheck="false">
+    <button id="randomBtn" title="随机一条">🎲</button>
+    <button id="themeBtn" title="切换日/夜模式">🌙</button>
+    <label class="switch" title="只看本次更新新增的词条">
+      <input type="checkbox" id="newToggle"><span>仅看新增</span>
+    </label>
+    <label class="switch" title="显示 NSFW 法典（suozhang_r18 / mengshen_r18）">
+      <input type="checkbox" id="nsfwToggle"><span>NSFW</span>
+    </label>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-head">分类目录</div>
+    <div id="tree"></div>
+    <div class="sidebar-foot" id="stats"></div>
+  </aside>
+  <main class="content">
+    <div id="status" class="status"></div>
+    <div id="results" class="masonry"></div>
+    <div id="empty" class="empty" hidden>
+      <p>暂无法典数据。</p>
+      <p class="dim">提示：直接用浏览器打开本文件（file://）即可离线使用；无需联网、无需服务器。</p>
+    </div>
+  </main>
+</div>
+
+<section id="selfView" class="self-view" hidden>
+  <div class="self-head">
+    <h2>我的图库</h2>
+    <p>上传自己生成的图片，自动读出它用了什么底模、哪些 LoRA 和提示词，并给出对应的 C 站链接。
+       <strong>只给链接，不下载</strong> —— 拿到页面后你自己去 LoRA-Manager 里装。</p>
+  </div>
+
+  <div class="self-layout">
+    <!-- 左：自定义分组 -->
+    <aside class="self-groups">
+      <div class="self-groups-head">我的分组</div>
+      <div id="selfGroupList"></div>
+      <button id="selfGroupNew" class="self-group-new">＋ 新建分组</button>
+      <div class="self-groups-foot" id="selfGroupStats"></div>
+    </aside>
+
+    <!-- 中：卡片网格（与法典同一套卡片样式） -->
+    <main class="self-main">
+      <div id="selfStatus" class="status"></div>
+      <div id="selfResults" class="masonry"></div>
+      <div id="selfEmpty" class="empty" hidden>
+        <p>这个分组里还没有图片。</p>
+        <p class="dim">把图片拖进右边的框，解析出的卡片会出现在这里；点卡片下方的「保存到图库」就写进 self-image/。</p>
+      </div>
+    </main>
+
+    <!-- 右：上传 + 保存位置 -->
+    <aside class="self-upload">
+      <div id="selfDrop" class="self-drop">
+        <input type="file" id="selfFile" accept="image/png,image/jpeg" multiple hidden>
+        <div class="self-drop-icon">🖼</div>
+        <div class="self-drop-title">把图片拖到这里</div>
+        <div class="dim">或点击选择 · 支持 PNG / JPEG · 可一次选多张</div>
+      </div>
+
+      <div class="self-path">
+        <div class="self-path-label">保存位置</div>
+        <div id="selfPathText" class="self-path-text">未设置 —— 首次保存时请选择默认保存路径</div>
+        <button id="selfPathBtn" class="self-path-btn" title="重新选择图片保存到的文件夹">修改保存路径</button>
+      </div>
+
+      <div class="self-note">
+        <div class="self-note-title">推荐保存到 self-image 文件夹</div>
+        <p>它就在法典站点的根目录下，跟 <code>data/</code>、<code>images/</code> 同一级：</p>
+        <pre class="self-tree">法典站点/
+├─ index.html
+├─ data/          词库数据
+├─ images/        词库配图
+└─ self-image/    ← 你的图放这里</pre>
+        <p>存在这里，图库每次打开都会自动读出来，不用重新授权文件夹，也不会随浏览器缓存一起丢掉。</p>
+      </div>
+
+      <div class="self-tip dim">
+        整页都能接收拖拽。解析全在本机完成，图片不会上传到任何地方。<br>
+        双击 <strong>启动法典.bat</strong> 打开时，后端会把图直接写进 self-image/，不用选文件夹。
+      </div>
+    </aside>
+  </div>
+</section>
+
+<div id="selfConfirm" class="confirm-modal" hidden>
+  <div class="confirm-box" role="alertdialog" aria-modal="true" aria-labelledby="selfConfirmTitle">
+    <h3 id="selfConfirmTitle"></h3>
+    <div id="selfConfirmBody" class="confirm-body"></div>
+    <div class="confirm-actions">
+      <button id="selfConfirmCancel" class="ghost" type="button">取消</button>
+      <button id="selfConfirmOk" class="danger" type="button">确认</button>
+    </div>
+  </div>
+</div>
+
+<div id="selfDetail" class="detail-modal" hidden>
+  <div class="detail-box" role="dialog" aria-modal="true" aria-label="图片详情">
+    <button id="selfDetailClose" class="detail-close" title="关闭（Esc）">✕</button>
+    <div class="detail-figure">
+      <img id="selfDetailImg" alt="">
+      <div id="selfDetailHint" class="detail-figure-hint">点图片复制全部提示词</div>
+    </div>
+    <div class="detail-info self-detail">
+      <div id="selfDetailInfo" class="detail-scroll"></div>
+
+      <!-- 上传审阅条：固定在右栏底部，不随详情滚动。
+           这一步是"必须先决定"，所以关不掉、只能二选一。 -->
+      <div id="selfDetailReview" class="detail-review" hidden>
+        <div class="detail-review-q" id="selfReviewQuestion">这张要存进图库吗？</div>
+        <div class="detail-review-note">
+          存进站点根目录下的 <code>self-image/</code>，下次打开图库会自动读出来。
+        </div>
+        <div class="detail-review-actions">
+          <button id="selfReviewSave" class="primary" type="button">保存到图库</button>
+          <button id="selfReviewSkip" class="ghost" type="button">不保存</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="nsfwGate" class="nsfw-gate" hidden>
+  <div class="nsfw-card">
+    <h2>⚠️ 成人内容法典</h2>
+    <p>当前法典包含 NSFW / R18 内容，仅限成年人查看。<br>进入后会自动开启右上角 NSFW 开关，本机记住授权，刷新页面无需重复确认。</p>
+    <button id="nsfwEnter">我已成年，进入查看</button>
+    <button id="nsfwCancel" class="ghost">取消</button>
+  </div>
+</div>
+
+<footer class="foot">
+  数据来源：<span id="footSource"></span>
+  · 提示词已由 NAI 语法转换为 A1111 权重语法（SDXL / Animagine 通用）
+  · 数据仅存于本机浏览器，不上传
+  · <a href="converter.html" style="color:var(--accent)">NAI→Tag 转换工具</a>
+</footer>
+
+<script src="data/index.js"></script>
+<script src="self-image/index.js"></script>
+<script src="gallery-meta.js"></script>
+<script src="app.js"></script>
+<script src="gallery.js"></script>
+<script>
+/* 加载自检：缺哪个脚本，就在页面顶上摆一条明明白白的横幅。
+ *
+ * 为什么内联在这里而不是放进某个 js：这几个脚本本身要是没加载成功，
+ * 放在它们里面的检查也一起没跑 —— 只有 HTML 里的内联脚本永远执行。
+ * 排查"某个脚本没跑起来"时，这是唯一不会被缓存骗到的信号。
+ */
+(function () {
+  function check() {
+    var miss = [];
+    if (!window.QTC_META) miss.push('data/index.js');
+    if (typeof window.SELF_META === 'undefined') miss.push('self-image/index.js');
+    if (!window.SelfMeta) miss.push('gallery-meta.js');
+    if (!window.SelfGallery) miss.push('gallery.js');
+    if (window.__selfGalleryChecked) {
+      /* 二轮自检（图库脚本若在后面补跑成功，把横幅撤掉） */
+      if (!miss.length && window.__selfGalleryBanner) {
+        window.__selfGalleryBanner.remove();
+        window.__selfGalleryBanner = null;
+      }
+      return;
+    }
+    if (!miss.length) { window.__selfGalleryChecked = true; return; }
+    var bar = document.createElement('div');
+    bar.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:99999;'
+      + 'background:#b91c1c;color:#fff;padding:9px 14px;line-height:1.6;'
+      + 'font:13px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;'
+      + 'box-shadow:0 2px 10px rgba(0,0,0,.4);';
+    bar.textContent = '⚠ 这些脚本没加载成功：' + miss.join('、')
+      + '　—— 按 Ctrl+F5 强制刷新；若还是这样，就是这个文件被浏览器缓存了旧内容。';
+    document.body.appendChild(bar);
+    window.__selfGalleryBanner = bar;
+    window.__selfGalleryChecked = true;
+  }
+  if (document.readyState === 'complete') setTimeout(check, 400);
+  else window.addEventListener('load', function () { setTimeout(check, 400); });
+  /* 再补一次：慢的网络下脚本可能落在 load 之后 */
+  setTimeout(check, 2500);
+})();
+</script>
+</body>
+</html>

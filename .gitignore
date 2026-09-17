@@ -1,0 +1,26 @@
+﻿# 本机配置（每台机器路径都不同，不要提交）
+config.json
+
+# 内置站点（atlas/）里的「大件」不提交：
+#   images/      词库配图，1.6 GB / 44984 个文件，各人按需自己放
+#   self-image/  我的图库（自己上传的图 + 索引 + 删除流水）
+# 站点代码与 data/（词库数据）是内置的，随仓库一起分发。
+atlas/images/*
+!atlas/images/README.txt
+atlas/self-image/*
+!atlas/self-image/.gitkeep
+
+# 运行时产物
+cache/
+__pycache__/
+*.pyc
+*.pyo
+
+# 编辑器 / 系统
+.venv/
+venv/
+.vscode/
+.idea/
+node_modules/
+.DS_Store
+Thumbs.db

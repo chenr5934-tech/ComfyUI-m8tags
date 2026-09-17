@@ -1,0 +1,22 @@
+[project]
+name = "comfyui-codex-atlas"
+version = "0.2.0"
+description = "法典图鉴：把本地离线提示词法典接进 ComfyUI，支持随机抽词、NAI↔A1111 语法切换、带已选栏的站内小窗与一键推送"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = []
+keywords = ["comfyui", "prompt", "novelai", "a1111", "codex"]
+
+[project.urls]
+# 发布到 GitHub 后填上，例如：
+# Repository = "https://github.com/<你的用户名>/ComfyUI-CodexAtlas"
+
+[tool.comfy]
+PublisherId = "local"
+DisplayName = "法典图鉴"
+Icon = ""
+requires-comfyui = ">=0.3.0"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"

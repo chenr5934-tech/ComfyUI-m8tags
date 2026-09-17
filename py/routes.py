@@ -12,7 +12,6 @@ import base64
 import json
 import os
 import random
-import re
 import shutil
 import threading
 import time

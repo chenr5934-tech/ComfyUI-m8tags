@@ -165,9 +165,13 @@ Get-ChildItem .\m8tags-images-part*.zip | ForEach-Object {
 五个包互不依赖，只下一个、只解一个就照上面放；想省空间也可以只下你要的法典所在的包（对照上面的表格）。
 例图是静态文件，解压完**刷新一下浏览器页面**就显示，不用重启 ComfyUI。
 
-> 顺带说明：`images/` 下有 16 个目录，但站点只列 `data/index.js` 里登记的法典（当前 13 部）。
-> `artist_nai45_strings`、`community_ai_misc`、`mengshen_pack` 这三部的数据文件和例图都在，
-> 只是没登记进索引，所以站点里看不到这几部法典 —— 它们的图放在那儿也不占界面，属于正常现象。
+> **`images/` 里有 16 个目录，站点却只列 13 部法典，这不是缺漏。**
+> 多出来的 `artist_nai45_strings`、`mengshen_pack`、`community_ai_misc` 是法典合并时**被取代的旧版**
+> —— 原始索引里 `artist_nai45_personal` 的 `aliases` 记着前者，`nai45_community_pack` 的 `aliases`
+> 记着后两者。实测过内容：后两部的词条 100% 已被 `nai45_community_pack` 收进去
+> （5471 条旧数据全在其中，新版另有 13 条新增），`artist_nai45_strings` 的 458 条标题全部与新法典重合、
+> tags 已被重新修订。所以站点不列它们是对的，列出来只会是重复的过时内容。
+> 想省 257 MB 硬盘，可以删掉 `atlas/images/` 下这三个目录，对显示没有任何影响。
 
 **不装例图照样能用**：卡片位置显示占位图，检索、筛选、复制、已选栏、推送节点全部照常。
 例图只是卡片上的一张预览。

@@ -1,14 +1,22 @@
-"""把法典例图打包成可分发的大包。
+"""把法典例图打成分卷压缩包（7z 分卷），用于分发。
 
-例图没法进 git：1636 MB / 44984 个文件，远超 GitHub 仓库的合理体积。
-所以走 Release 附件分发 —— 这个脚本把 images/<codex>/ 按体积累计装箱，
-每包不超过 --max-mb，包内路径固定为 images/<codex>/<file>，
-别人解压到插件的 atlas/ 目录就直接到位。
+例图没法进 git（站点源目录里是 16 个目录 / 1636 MB / 44984 个文件），走 GitHub Release
+附件分发。默认只打站点登记在册的法典 —— 当前 13 部 / 37684 个文件 / 约 1.3 GB。
+这里打成 **7z 分卷**：`m8tags-images.7z.001`、`.002`…，**必须下齐所有卷才能解压**。
+好处是不会出现"只下了其中几个、图缺了一半还没察觉"的情况，卷号也一眼能看出顺序。
+
+为什么是 7z 分卷而不是 zip 分卷：
+  - ZIP 的分卷（`.z01`/`.z02` + `.zip`）Python 的 zipfile 既不支持创建也不支持读取，
+    要引第三方库；7z 命令行现成，命名也对得上用户手上的 7-Zip。
+  - 早先那版是「多个互相独立的 zip」，用户少下一个包只会静默缺图，看不出问题。
+
+代价（这个要跟下载的人讲清楚）：
+  - 分卷只有 7-Zip / WinRAR 能解，Windows 资源管理器自带的「全部解压」不认分卷；
+  - 任意一个卷缺失或损坏，整包都打不开 —— 下完先对 SHA256 再解压。
 
 用法：
-    python tools/pack-images.py --src "D:/.../本地离线提示词法典/images" --out "D:/dist"
-
-同一个法典不会被打散到两个包里 —— 每个目录整体入箱，箱子装不下就开新箱。
+    python tools/pack-images.py --src "<站点>/images" --out "D:/dist"
+    python tools/pack-images.py --src "<站点>/images" --out "D:/dist" --volume 420
 """
 
 from __future__ import annotations
@@ -16,9 +24,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
+import subprocess
 import sys
 import time
-import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,6 +35,13 @@ try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
+
+# 常见安装位置，找不到再用 PATH
+SEVEN_ZIP_CANDIDATES = (
+    r"D:\7z\7-Zip\7z.exe",
+    r"C:\Program Files\7-Zip\7z.exe",
+    r"C:\Program Files (x86)\7-Zip\7z.exe",
+)
 
 
 def human(n: float) -> str:
@@ -36,132 +52,180 @@ def human(n: float) -> str:
     return "{} B".format(int(n))
 
 
+def find_7z(explicit: str | None) -> Path:
+    if explicit:
+        p = Path(explicit)
+        if p.is_file():
+            return p
+        raise SystemExit("--7z 指的路径不是文件：{}".format(p))
+    for cand in SEVEN_ZIP_CANDIDATES:
+        if Path(cand).is_file():
+            return Path(cand)
+    found = shutil.which("7z") or shutil.which("7za")
+    if found:
+        return Path(found)
+    raise SystemExit(
+        "找不到 7z.exe。用 --7z 指定，例如：\n"
+        "  --7z \"D:/7z/7-Zip/7z.exe\""
+    )
+
+
 def sha256_of(path: Path, chunk: int = 1 << 20) -> str:
     h = hashlib.sha256()
     with path.open("rb") as fh:
-        while True:
-            block = fh.read(chunk)
-            if not block:
-                break
+        for block in iter(lambda: fh.read(chunk), b""):
             h.update(block)
     return h.hexdigest()
 
 
-def collect(src: Path):
-    """列出 images/ 下的每个法典目录及其体积。"""
-    groups = []
+def registered_codex_ids(site_root: Path):
+    """读站点 data/index.js 的 QTC_META，返回真正登记在册的法典 id。
+
+    例图目录里常留着一些「已被合并取代的旧版」的图 —— 比如 mengshen_pack 和
+    community_ai_misc 早就并进了 nai45_community_pack，artist_nai45_strings 并进了
+    artist_nai45_personal，但它们自己的 images/ 目录还在（实测这部分有 257 MB）。
+    站点根本不会列出这些法典，打进去只是让下载的人白下几百兆、下完还看不到。
+    """
+    index = site_root / "data" / "index.js"
+    if not index.is_file():
+        return None
+    try:
+        text = index.read_text("utf-8")
+        start = text.find("[")
+        if start < 0:
+            return None
+        data, _ = json.JSONDecoder().raw_decode(text, start)
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(data, list):
+        return None
+    ids = [m.get("id") for m in data if isinstance(m, dict) and m.get("id")]
+    return ids or None
+
+
+def scan_source(src: Path, only=None):
+    """统计内容。only 给定时，只收其中的法典目录，其余记进 skipped。"""
+    total = 0
+    size = 0
+    keep = []
+    skipped = []
     for d in sorted(src.iterdir()):
         if not d.is_dir():
             continue
-        files = [f for f in sorted(d.iterdir()) if f.is_file()]
+        files = [f for f in d.rglob("*") if f.is_file()]
         if not files:
             continue
-        size = sum(f.stat().st_size for f in files)
-        groups.append({"name": d.name, "dir": d, "files": files, "size": size})
-    return groups
-
-
-def bin_pack(groups, max_bytes: int):
-    """贪心装箱：大的先放，装不下就开新箱。同一个法典不拆散。"""
-    bins = []
-    for g in sorted(groups, key=lambda x: -x["size"]):
-        if g["size"] > max_bytes:
-            bins.append({"items": [g], "size": g["size"], "oversize": True})
+        bytes_here = sum(f.stat().st_size for f in files)
+        if only is not None and d.name not in only:
+            skipped.append((d.name, len(files), bytes_here))
             continue
-        for b in bins:
-            if b.get("oversize"):
-                continue
-            if b["size"] + g["size"] <= max_bytes:
-                b["items"].append(g)
-                b["size"] += g["size"]
-                break
-        else:
-            bins.append({"items": [g], "size": g["size"], "oversize": False})
-    return bins
-
-
-def write_part(dst: Path, group_items, quiet: bool = False):
-    """ZIP_STORED：JPEG 已经压过，再 deflate 只浪费时间换 1% 体积。"""
-    written = 0
-    total = sum(len(g["files"]) for g in group_items)
-    t0 = time.time()
-    with zipfile.ZipFile(dst, "w", zipfile.ZIP_STORED, allowZip64=True) as zf:
-        for g in group_items:
-            for f in g["files"]:
-                zf.write(f, arcname="images/{}/{}".format(g["name"], f.name))
-                written += 1
-                if not quiet and written % 5000 == 0:
-                    print("      {}/{} files  ({:.0f}s)".format(
-                        written, total, time.time() - t0), flush=True)
-    return written
+        keep.append(d.name)
+        total += len(files)
+        size += bytes_here
+    return total, size, keep, skipped
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="把法典例图打包成分发用的大包")
+    ap = argparse.ArgumentParser(description="把法典例图打成 7z 分卷")
     ap.add_argument("--src", required=True, help="例图目录（含 <codex>/ 子目录）")
     ap.add_argument("--out", required=True, help="输出目录")
-    ap.add_argument("--max-mb", type=int, default=400, help="单个包上限（默认 400 MB）")
-    ap.add_argument("--prefix", default="m8tags-images", help="包名前缀")
+    ap.add_argument("--7z", dest="seven_zip", default=None, help="7z.exe 路径")
+    ap.add_argument("--volume", type=int, default=420, help="每卷大小 MB（默认 420）")
+    ap.add_argument("--name", default="m8tags-images", help="包名")
+    ap.add_argument("--all", action="store_true",
+                    help="连没登记进站点索引的旧版目录一起打（默认只打登记在册的）")
     args = ap.parse_args()
 
+    seven = find_7z(args.seven_zip)
     src = Path(args.src).resolve()
     out = Path(args.out).resolve()
     if not src.is_dir():
-        print("找不到例图目录:", src)
-        return 1
+        raise SystemExit("找不到例图目录：{}".format(src))
     out.mkdir(parents=True, exist_ok=True)
 
-    groups = collect(src)
-    total_files = sum(len(g["files"]) for g in groups)
-    total_size = sum(g["size"] for g in groups)
-    print("源目录 :", src)
-    print("法典数 :{}，文件 {}，合计 {}".format(len(groups), total_files, human(total_size)))
+    registered = None if args.all else registered_codex_ids(src.parent)
+    total_files, total_size, codex_ids, skipped = scan_source(src, registered)
+    if not total_files:
+        raise SystemExit("例图目录是空的：{}".format(src))
 
-    bins = bin_pack(groups, args.max_mb * 1024 * 1024)
-    print("装箱   : {} 个包（上限 {} MB）".format(len(bins), args.max_mb))
-    for i, b in enumerate(bins, 1):
-        names = ", ".join(g["name"] for g in b["items"])
-        flag = "  [超限，单独成包]" if b.get("oversize") else ""
-        print("   part{:<2} {:>9}  {} 个文件  {}{}".format(
-            i, human(b["size"]), sum(len(g["files"]) for g in b["items"]), names, flag))
+    print("源目录 : {}".format(src))
+    if registered:
+        print("在册   : data/index.js 登记了 {} 部法典，按它筛".format(len(registered)))
+    print("内容   : {} 个法典目录，{} 个文件，{}".format(
+        len(codex_ids), total_files, human(total_size)))
+    if skipped:
+        print("跳过   : {} 个未登记的旧版目录，省下 {}".format(
+            len(skipped), human(sum(s[2] for s in skipped))))
+        for name, n, b in skipped:
+            print("         {:<24} {} 个文件  {}".format(name, n, human(b)))
+    print("打包器 : {}".format(seven))
+    print("分卷   : 每卷 {} MB".format(args.volume))
 
+    archive = out / "{}.7z".format(args.name)
+    # 清掉上次留下的卷，否则 7z 会停下来问要不要覆盖
+    stale = sorted(out.glob("{}.7z.*".format(args.name)))
+    for old in stale:
+        old.unlink()
+    if archive.is_file():
+        archive.unlink()
+    if stale:
+        print("已清掉 {} 个旧卷".format(len(stale)))
+
+    # cwd 设在源目录的父级、源用相对名，这样包内路径就是 images/<codex>/<file>，
+    # 解压到插件的 atlas/ 下即可就位。
+    # -m0=Copy：JPEG 早就压过了，再跑一遍 LZMA 只是白等，体积几乎不变。
+    cmd = [
+        str(seven), "a",
+        "-v{}m".format(args.volume),
+        "-m0=Copy",
+        "-bso0", "-bsp0",          # 进度条会刷屏，关掉
+        str(archive),
+    ] + ["{}/{}".format(src.name, cid) for cid in codex_ids]
+    print("\n正在打包（Copy 模式，不做二次压缩）…", flush=True)
+    t0 = time.time()
+    proc = subprocess.run(cmd, cwd=str(src.parent))
+    if proc.returncode != 0:
+        raise SystemExit("7z 打包失败，退出码 {}".format(proc.returncode))
+    print("打包完成，用时 {:.0f}s".format(time.time() - t0))
+
+    volumes = sorted(out.glob("{}.7z.*".format(args.name)))
+    if not volumes:
+        raise SystemExit("没有生成分卷 —— --volume 是不是比内容还大？")
+
+    print("\n分卷（{} 个）:".format(len(volumes)))
     parts = []
-    for i, b in enumerate(bins, 1):
-        name = "{}-part{}.zip".format(args.prefix, i)
-        dst = out / name
-        print("\n[{}] 写入 {}".format(i, name), flush=True)
-        n = write_part(dst, b["items"])
-        size = dst.stat().st_size
-        print("      完成 {} / {} 个文件，校验中…".format(human(size), n), flush=True)
-        parts.append({
-            "name": name,
-            "bytes": size,
-            "sha256": sha256_of(dst),
-            "files": n,
-            "codices": [g["name"] for g in b["items"]],
-        })
-        print("      sha256 {}".format(parts[-1]["sha256"][:16] + "…"))
+    for v in volumes:
+        size = v.stat().st_size
+        digest = sha256_of(v)
+        parts.append({"name": v.name, "bytes": size, "sha256": digest})
+        print("  {:<32} {:>9}  {}".format(v.name, human(size), digest[:16] + "…"))
 
     manifest = {
         "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "source": src.name,
+        "format": "7z-split",
+        "layout": "{}/<codex>/<file>".format(src.name),
         "extractTo": "atlas/",
-        "layout": "images/<codex>/<file>",
+        "firstVolume": volumes[0].name,
+        "howToExtract": (
+            "把所有分卷下到同一个目录，用 7-Zip 右键第一个卷 "
+            "→ 解压到插件的 atlas/ 下。Windows 自带的解压不支持分卷。"
+        ),
+        "volumeBytes": args.volume * 1024 * 1024,
         "totalFiles": total_files,
         "totalBytes": total_size,
-        "maxBytesPerPart": args.max_mb * 1024 * 1024,
-        "codices": sorted(g["name"] for g in groups),
+        "codices": codex_ids,
+        "skipped": [{"id": n, "files": f, "bytes": b} for n, f, b in skipped],
         "parts": parts,
     }
     (out / "MANIFEST.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-    sums = out / "SHA256SUMS.txt"
-    sums.write_text(
+    (out / "SHA256SUMS.txt").write_text(
         "".join("{}  {}\n".format(p["sha256"], p["name"]) for p in parts), encoding="utf-8")
 
-    print("\n总共 {} 个包，{} 个文件，{}".format(len(parts), total_files, human(total_size)))
+    print("\n合计 {} 个卷，{} 个文件，{}".format(len(parts), total_files, human(total_size)))
     print("解压目标：<插件目录>/{}".format(manifest["extractTo"]))
+    print("包里路径：{}/<codex>/<file>".format(src.name))
     print("清单    ：{}".format(out / "MANIFEST.json"))
     return 0
 

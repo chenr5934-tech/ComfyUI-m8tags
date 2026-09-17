@@ -89,7 +89,7 @@ def ensure_release(session, repo: str, tag: str, name: str, body: str) -> dict:
 
 
 def existing_assets(session, repo: str, release_id: int) -> dict:
-    """返回 {附件名: 字节数}。"""
+    """返回 {附件名: {"id": 附件 id, "size": 字节数}}。id 留着删旧附件用。"""
     out = {}
     page = 1
     while True:
@@ -102,7 +102,7 @@ def existing_assets(session, repo: str, release_id: int) -> dict:
         if not batch:
             break
         for a in batch:
-            out[a["name"]] = a["size"]
+            out[a["name"]] = {"id": a["id"], "size": a["size"]}
         page += 1
     return out
 
@@ -120,7 +120,8 @@ def upload_asset(session, repo: str, release_id: int, path: Path) -> None:
                 "Content-Type": "application/octet-stream",
                 "Content-Length": str(size),
             },
-            timeout=(30, 3600),
+            # 读超时别设太长：连接僵死时要能自己断掉重来，而不是挂一小时。
+            timeout=(30, 900),
         )
     if r.status_code not in (200, 201):
         raise SystemExit("上传 {} 失败 HTTP {}: {}".format(path.name, r.status_code, r.text[:400]))
@@ -136,6 +137,8 @@ def main() -> int:
     ap.add_argument("--tag", default="images-v1")
     ap.add_argument("--title", default=None)
     ap.add_argument("--skip-sha", action="store_true", help="跳过上传前的 sha256 复核")
+    ap.add_argument("--replace", action="store_true",
+                    help="上传前删掉 Release 上不在本次清单里的旧附件（换打包格式时用）")
     args = ap.parse_args()
 
     out = Path(args.dir).resolve()
@@ -164,10 +167,15 @@ def main() -> int:
     release = ensure_release(
         session, args.repo, args.tag,
         args.title or "法典例图包 {}".format(args.tag),
-        "完整例图（{} 个文件，{}）。解压到插件目录的 `atlas/` 下即可。\n\n"
-        "包内路径固定为 `images/<codex>/<file>`；每个包都可独立解压，互不依赖。\n"
+        "完整例图，{} 个文件 / {}，打成了 **7z 分卷**。\n\n"
+        "**必须把 {} 个卷全部下到同一个目录再解压** —— 缺任何一个卷都打不开。\n\n"
+        "1. 下齐 `{}` … `{}`，连同 `SHA256SUMS.txt`\n"
+        "2. 用 7-Zip 右键**第一个卷**（`{}`）→ 解压到插件的 `atlas/` 目录下\n"
+        "3. 包内路径是 `images/<codex>/<file>`，解压完自然就是 `atlas/images/...`，不用再挪\n\n"
+        "Windows 资源管理器自带的「全部解压」**不认分卷**，得用 7-Zip 或 WinRAR。\n"
         "校验用 `SHA256SUMS.txt`，明细见 `MANIFEST.json`。\n".format(
-            manifest["totalFiles"], human(manifest["totalBytes"])),
+            manifest["totalFiles"], human(manifest["totalBytes"]),
+            len(parts), parts[0]["name"], parts[-1]["name"], parts[0]["name"]),
     )
     release_id = release["id"]
     have = existing_assets(session, args.repo, release_id)
@@ -175,17 +183,40 @@ def main() -> int:
         print("已有附件：{}".format(", ".join(sorted(have))))
 
     files = [out / p["name"] for p in parts] + [out / "SHA256SUMS.txt", manifest_path]
+    for f in files:
+        if not f.is_file():
+            raise SystemExit("缺文件：{}".format(f))
+    want = {f.name: f.stat().st_size for f in files}
+
+    # --replace：把 Release 上对不上的旧附件清掉。两种情况都要管：
+    #   1) 名字不在本次清单里的 —— 比如换了打包格式，旧的独立 zip 还挂着；
+    #   2) 同名但内容变了的 —— MANIFEST.json / SHA256SUMS.txt 每次打包都会变。
+    # 只按名字判断会漏掉第 2 种，结果清单永远停在上一版。
+    if args.replace:
+        for name in sorted(have):
+            if want.get(name) == have[name]["size"]:
+                continue
+            # 删除附件的端点不带 release id —— 带 release_id 的那种只用于「列出附件」，
+            # 拿来删会一直 404。（这个坑先前让 --replace 静默失灵了两轮。）
+            r = session.delete("{}/repos/{}/releases/assets/{}".format(
+                API, args.repo, have[name]["id"]), timeout=60)
+            if r.status_code == 204:
+                print("   x 已删除旧附件 {}".format(name))
+                have.pop(name, None)
+            else:
+                print("   ! 删除 {} 失败 HTTP {}".format(name, r.status_code))
+
     uploaded = 0
     for path in files:
         if not path.is_file():
             raise SystemExit("缺文件：{}".format(path))
         size = path.stat().st_size
-        if have.get(path.name) == size:
+        if (have.get(path.name) or {}).get("size") == size:
             print("   - {} 已存在且大小一致，跳过".format(path.name))
             continue
-        if have.get(path.name) is not None:
-            print("   ! {} 已存在但大小不同（{} vs {}），需要先在网页删掉再重跑".format(
-                path.name, human(have[path.name]), human(size)))
+        if path.name in have:
+            print("   ! {} 已存在但大小不同（{} vs {}），跳过；加 --replace 可自动替换".format(
+                path.name, human(have[path.name]["size"]), human(size)))
             continue
         if not args.skip_sha:
             want = next((p["sha256"] for p in parts if p["name"] == path.name), None)

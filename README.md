@@ -4,7 +4,8 @@
 把挑好的词一次推进节点。词库和站点全在你自己的机器上，不联网。
 
 仓库自带 13 部法典、39111 条词条（约 45 MB 数据），克隆下来放进 `custom_nodes/` 就能用，
-**不需要另外准备站点**。例图（1.6 GB）不在仓库里，要从 Release 单独下，见「完整例图」一节 —— 不下也能正常用。
+**不需要另外准备站点**。例图（约 1.3 GB，7z 分卷）不在仓库里，要从 Release 单独下，
+见「完整例图」一节 —— 不下也能正常用。
 
 ## 快速上手
 
@@ -99,25 +100,39 @@ mklink /J "<ComfyUI>\custom_nodes\ComfyUI-CodexAtlas" "<本仓库克隆到的位
 
 ## 完整例图
 
-仓库里**不带例图**：1636 MB / 44984 个文件，超出仓库该有的体积。例图单独发布成 Release 附件。
+仓库里**不带例图**：超出仓库该有的体积。例图单独发布成 Release 附件，打成了 **7z 分卷**。
 
 **下载页**：https://github.com/chenr5934-tech/ComfyUI-m8tags/releases/tag/images-v1
 
-把下面这些包全部下下来（合计约 1.6 GB）：
+把下面**全部 4 个卷**下到同一个目录（合计约 1.3 GB）：
 
-| 包 | 大小 | 文件数 | 包含的法典 |
-| --- | --- | --- | --- |
-| `m8tags-images-part1.zip` | 400.5 MB | 11131 | suozhang_r18, jiegou_yuandian |
-| `m8tags-images-part2.zip` | 400.9 MB | 10673 | nai45_community_pack, artist_nai5_personal, artist_nai45_strings, enter_codex, mengshen_r18 |
-| `m8tags-images-part3.zip` | 399.7 MB | 10733 | artist_nai45_personal, community_ai_misc, qianteng, composition_style |
-| `m8tags-images-part4.zip` | 380.5 MB | 10761 | suozhang, nai5_community_pack, raven_composition, kisegaeningyou |
-| `m8tags-images-part5.zip` | 61.7 MB | 1686 | mengshen_pack |
-| `SHA256SUMS.txt` | 1 KB | — | 校验和 |
+| 分卷 | 大小 |
+| --- | --- |
+| `m8tags-images.7z.001` | 420.0 MB |
+| `m8tags-images.7z.002` | 420.0 MB |
+| `m8tags-images.7z.003` | 420.0 MB |
+| `m8tags-images.7z.004` | 119.1 MB |
+| `SHA256SUMS.txt` | 1 KB |
+
+**必须下齐才能解压。** 这是同一个包切成的分卷，不是互相独立的压缩包 —— 少任何一个卷，整包都打不开。
+好处也正是这个：不会出现"只下了其中几个、图缺了一半还没察觉"。
+
+### 怎么解压
+
+**用 7-Zip**（或 WinRAR）。右键**第一个卷** `m8tags-images.7z.001` → `7-Zip` → `解压到…`，
+目标填插件的 `atlas/` 目录。命令行等价写法：
+
+```
+7z x m8tags-images.7z.001 -o"<插件目录>\atlas"
+```
+
+> Windows 资源管理器自带的「全部解压」**不认分卷**，双击 `.001` 只会报错。
+> 没装 7-Zip 就去 [7-zip.org](https://www.7-zip.org/) 下一个，几 MB 的事。
 
 ### 解压到 `atlas/`，不是 `atlas/images/`
 
-包里的第一层**已经是 `images/`** 了（实测第一条就是 `images/mengshen_pack/mengshen_pack-0259.jpg`），
-所以要把整个包解压到 **`atlas/`**，让 `images/` 这一层刚好落在它下面，最终长成：
+包里的第一层**已经是 `images/`** 了，所以目标是把整个包解压到 **`atlas/`**，
+让 `images/` 这一层刚好落在它下面：
 
 ```
 ComfyUI-CodexAtlas/
@@ -127,74 +142,56 @@ ComfyUI-CodexAtlas/
     ├── images/                ← 解压出来的就是这个
     │   ├── suozhang_r18/
     │   ├── jiegou_yuandian/
-    │   └── …（共 16 个目录）
+    │   └── …（共 13 个目录）
     └── self-image/
 ```
 
 **别解压到 `atlas/images/`** —— 那样会变成 `atlas/images/images/<codex>/`，站点找不到图。
 包名和目录名都带 `images`，这一步最容易搞反，对着上面的树看一眼就清楚了。
 
-**Windows 右键「全部解压」会多套一层。** 它是先建一个和压缩包同名的文件夹再往里放，
-于是你会得到 `atlas/m8tags-images-part1/images/...`。真这样了就进那一层，
-把里面的 `images` 整个拖到 `atlas/` 下 —— `atlas/images/` 已经存在也没关系，拖进去会自动合并。
-
-省事的做法是直接指定目标目录，一次解完（把 `<插件目录>` 换成你的实际路径，注意路径要加引号）：
-
-```powershell
-# PowerShell，在放 zip 的那个目录里跑，五个包一起解
-Get-ChildItem .\m8tags-images-part*.zip | ForEach-Object {
-  Expand-Archive -LiteralPath $_ -DestinationPath "<插件目录>\atlas" -Force
-}
-```
-
-```
-# 7-Zip：用「解压到当前位置」，不要用「解压到 m8tags-images-partN\」
-7z x m8tags-images-part1.zip -o"<插件目录>\atlas"
-```
-
 ### 怎么确认放对了
 
-只解了 part1 的话，`atlas/images/jiegou_yuandian/` 里应该是 **265 张** `.jpg`：
+`atlas/images/jiegou_yuandian/` 里应该是 **265 张** `.jpg`：
 
 ```powershell
 (Get-ChildItem "<插件目录>\atlas\images\jiegou_yuandian" -Filter *.jpg).Count   # 265
 ```
 
-五个包全解完，`atlas/images/` 下会有 16 个目录、合计 44984 个文件。
+全部到位的话，`atlas/images/` 下是 13 个目录、合计 37684 个文件。
 
-五个包互不依赖，只下一个、只解一个就照上面放；想省空间也可以只下你要的法典所在的包（对照上面的表格）。
 例图是静态文件，解压完**刷新一下浏览器页面**就显示，不用重启 ComfyUI。
-
-> **`images/` 里有 16 个目录，站点却只列 13 部法典，这不是缺漏。**
-> 多出来的 `artist_nai45_strings`、`mengshen_pack`、`community_ai_misc` 是法典合并时**被取代的旧版**
-> —— 原始索引里 `artist_nai45_personal` 的 `aliases` 记着前者，`nai45_community_pack` 的 `aliases`
-> 记着后两者。实测过内容：后两部的词条 100% 已被 `nai45_community_pack` 收进去
-> （5471 条旧数据全在其中，新版另有 13 条新增），`artist_nai45_strings` 的 458 条标题全部与新法典重合、
-> tags 已被重新修订。所以站点不列它们是对的，列出来只会是重复的过时内容。
-> 想省 257 MB 硬盘，可以删掉 `atlas/images/` 下这三个目录，对显示没有任何影响。
 
 **不装例图照样能用**：卡片位置显示占位图，检索、筛选、复制、已选栏、推送节点全部照常。
 例图只是卡片上的一张预览。
 
+> **包里只有 13 个法典目录，和站点列的 13 部是对齐的。**
+> 你自己站点的 `images/` 下如果有 16 个目录（多了 `artist_nai45_strings`、`community_ai_misc`、
+> `mengshen_pack`），那三个是法典合并时**被取代的旧版** —— `artist_nai45_personal` 的 `aliases`
+> 里记着前者，`nai45_community_pack` 的 `aliases` 里记着后两者，词条已被新法典完整收进去。
+> 站点不列它们是对的，打包时也会自动跳过（省 257 MB）；想连它们一起打，给脚本加 `--all`。
+
 校验（可选）：
 
 ```
-certutil -hashfile m8tags-images-part1.zip SHA256
+certutil -hashfile m8tags-images.7z.001 SHA256
 ```
 
-拿输出对着 `SHA256SUMS.txt` 里同名的行比。包是 `ZIP_STORED` 存的、没有二次压缩（JPEG 已经压过了），
-所以解压很快。
+拿输出对着 `SHA256SUMS.txt` 里同名的行比。包是 `Copy` 模式存的、没有二次压缩（JPEG 早就压过了），
+所以打包和解压都快。**分卷只要有一个对不上，整包都解不开，下完先验一遍更省事。**
 
 **自己重新打包**（图库更新之后）：
 
 ```
-python tools/pack-images.py   --src "<站点目录>/images" --out "<输出目录>"
-python tools/publish-images.py --dir "<输出目录>" --tag images-v2
+python tools/pack-images.py    --src "<站点目录>/images" --out "<输出目录>"
+python tools/publish-images.py --dir "<输出目录>" --tag images-v1 --replace
 ```
 
-第一个脚本按体积累计装箱，每包不超过 400 MB，同一个法典不拆散；顺带写出 `MANIFEST.json` 和 `SHA256SUMS.txt`。
-第二个脚本走 GitHub API 建 release 并上传附件，token 直接从 git 凭据管理器里取，已存在的附件会跳过 ——
-传断了直接重跑即可。
+第一个脚本读站点 `data/index.js`，**只打包登记在册的法典** —— 那些没登记的旧版目录（见上面那条注解）
+会自动跳过，想连它们一起打就加 `--all`。然后按 `--volume`（默认 420 MB）切成 7z 分卷，
+顺带写出 `MANIFEST.json` 和 `SHA256SUMS.txt`。
+
+第二个脚本走 GitHub API 建 release 并上传，token 从 git 凭据管理器里取；`--replace` 会先删掉 Release 上
+不在本次清单里的旧附件（换打包格式时用得上），已存在的附件跳过，传断了直接重跑。
 
 ## 常用操作
 

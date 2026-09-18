@@ -212,6 +212,11 @@
  * 为什么内联在这里而不是放进某个 js：这几个脚本本身要是没加载成功，
  * 放在它们里面的检查也一起没跑 —— 只有 HTML 里的内联脚本永远执行。
  * 排查"某个脚本没跑起来"时，这是唯一不会被缓存骗到的信号。
+ *
+ * 「没定义」其实是两种完全不同的情况，修法也不一样，所以这里真的去探一下那个
+ * 文件的 HTTP 状态，而不是一律甩给浏览器缓存：
+ *   · 404 —— 文件压根不在（比如 self-image/index.js 是存过图之后才生成的）
+ *   · 200 —— 文件在、却没执行起来，那才多半是缓存了旧内容
  */
 (function () {
   function check() {
@@ -230,16 +235,47 @@
       return;
     }
     if (!miss.length) { window.__selfGalleryChecked = true; return; }
+    window.__selfGalleryChecked = true;
+
     var bar = document.createElement('div');
     bar.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:99999;'
       + 'background:#b91c1c;color:#fff;padding:9px 14px;line-height:1.6;'
       + 'font:13px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;'
       + 'box-shadow:0 2px 10px rgba(0,0,0,.4);';
-    bar.textContent = '⚠ 这些脚本没加载成功：' + miss.join('、')
-      + '　—— 按 Ctrl+F5 强制刷新；若还是这样，就是这个文件被浏览器缓存了旧内容。';
+    bar.textContent = '⚠ 这些脚本没加载成功：' + miss.join('、') + '　（正在查原因…）';
     document.body.appendChild(bar);
     window.__selfGalleryBanner = bar;
-    window.__selfGalleryChecked = true;
+
+    Promise.all(miss.map(function (name) {
+      return fetch(name + '?probe=' + Date.now(), { cache: 'no-store' })
+        .then(function (r) { return { name: name, status: r.status }; })
+        .catch(function () { return { name: name, status: 0 }; });
+    })).then(function (rows) {
+      var gone = [], there = [], other = [];
+      rows.forEach(function (r) {
+        if (r.status === 404) gone.push(r.name);
+        else if (r.status === 200) there.push(r.name);
+        else other.push(r.name + '(' + (r.status || '连不上') + ')');
+      });
+      var parts = [];
+      if (gone.length) {
+        parts.push('【文件不存在】' + gone.join('、')
+          + '：这些文件不在站点目录里。self-image/index.js 是图库索引，'
+          + '存过图之后才会生成 —— 如果它一直不在，后端起一次就能兜住。');
+      }
+      if (there.length) {
+        parts.push('【文件在却没能启动】' + there.join('、')
+          + '：这才是浏览器拿着旧缓存，按 Ctrl+F5 强制刷新一次。');
+      }
+      if (other.length) {
+        parts.push('【读不到】' + other.join('、')
+          + '：站点没在服务端跑起来。双击「启动法典.bat」再试；'
+          + '直接双击 index.html（file://）的话就是这种。');
+      }
+      bar.textContent = '⚠ 这些脚本没加载成功：' + miss.join('、') + '　' + parts.join('　｜　');
+    }).catch(function () {
+      bar.textContent = '⚠ 这些脚本没加载成功：' + miss.join('、') + '　—— 按 Ctrl+F5 强制刷新一次。';
+    });
   }
   if (document.readyState === 'complete') setTimeout(check, 400);
   else window.addEventListener('load', function () { setTimeout(check, 400); });

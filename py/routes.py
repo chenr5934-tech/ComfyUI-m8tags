@@ -549,7 +549,22 @@ async def _handle_atlas_static(request):
     """伺服离线站点整目录（index.html / data / images）。"""
     tail = request.match_info.get("tail", "") or "index.html"
     target = _resolve_under(store.ATLAS_DIR, tail)
-    if target is None or not target.is_file():
+    if target is None:
+        raise web.HTTPNotFound(text="法典站点文件不存在")
+
+    # 图库索引是后端存图时才生成的，新装或清空后它并不存在；而站点的
+    # index.html 里有一条 <script src="self-image/index.js"> 会去加载它。
+    # 真回 404 的话，页面顶部那条自检横幅会误报「脚本没加载成功」，
+    # 还把人往浏览器缓存上引 —— 其实只是文件还没有。这里直接给个空索引。
+    if not target.is_file() and target.name == "index.js" \
+            and target.parent.name == "self-image":
+        return web.Response(
+            text="window.SELF_META = [];\n",
+            content_type="application/javascript", charset="utf-8",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    if not target.is_file():
         raise web.HTTPNotFound(text="法典站点文件不存在")
 
     if target.suffix.lower() in _IMAGE_SUFFIXES:

@@ -320,7 +320,22 @@ class Handler(SimpleHTTPRequestHandler):
         if route in ("", "/index.html"):
             self._serve_index()
             return
+        # 图库索引是后端存图时才生成的；新装或清空后它不存在，而 index.html 里
+        # 那条 <script src="self-image/index.js"> 会去加载它。真回 404 的话，
+        # 页面顶部的自检横幅会误报「脚本没加载成功」，还把人往浏览器缓存上引。
+        if route == "/self-image/index.js" and not (ROOT / SELF_DIR_NAME / "index.js").is_file():
+            self._send_empty_self_meta()
+            return
         super().do_GET()
+
+    def _send_empty_self_meta(self):
+        body = b"window.SELF_META = [];\n"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/javascript; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _serve_index(self):
         """首页单独发：给脚本引用打上版本戳。

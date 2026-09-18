@@ -9,6 +9,11 @@ atlas/images/*
 !atlas/images/README.txt
 atlas/self-image/*
 !atlas/self-image/.gitkeep
+# 初始空索引要跟着仓库走：站点 index.html 里有一条 <script src="self-image/index.js">，
+# 文件不存在时页面会顶一条"脚本没加载成功"的红横幅（而且把人往浏览器缓存上引）。
+# 后端虽然会兜底返回空索引，但 file:// 直接打开时没有后端，只能靠这个文件在。
+# 用户存图后这个文件会被重写 —— 那是他自己的图库数据，不该提交，留意别误 add。
+!atlas/self-image/index.js
 
 # 运行时产物
 cache/

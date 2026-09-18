@@ -543,6 +543,43 @@ class TestAtlasStatic(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertIn("法典图鉴", response.text)
 
+    def test_missing_self_image_index_serves_empty(self):
+        """图库索引是存图时才生成的，新装或清空后它并不存在 —— 但页面会去加载它。
+
+        真回 404 的话，顶部那条自检横幅会误报「脚本没加载成功」，
+        还把人往浏览器缓存上引（实际只是文件还没有）。所以这里必须回空索引。
+        """
+        d = Path(tempfile.mkdtemp(prefix="codex-atlas-noindex-"))
+        old = store.ATLAS_DIR
+        store.ATLAS_DIR = d
+        try:
+            self.assertFalse((d / "self-image" / "index.js").is_file())
+            r = call_static("self-image/index.js")
+            self.assertEqual(r.status, 200, "缺索引时不能 404")
+            self.assertIn(b"window.SELF_META", r.body)
+            self.assertIn(b"[]", r.body)
+        finally:
+            store.ATLAS_DIR = old
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_existing_self_image_index_is_served_as_is(self):
+        """文件真在的时候要原样发出去，不能被那个空索引兜底顶掉。"""
+        d = Path(tempfile.mkdtemp(prefix="codex-atlas-hasindex-"))
+        (d / "self-image").mkdir(parents=True)
+        (d / "self-image" / "index.js").write_text(
+            'window.SELF_META = [{"file":"a.jpg"}];\n', "utf-8")
+        old = store.ATLAS_DIR
+        store.ATLAS_DIR = d
+        try:
+            r = call_static("self-image/index.js")
+            self.assertEqual(r.status, 200)
+            # 文件在时走的是正常的 FileResponse（流式发文件），不是那个空索引兜底。
+            self.assertIsInstance(r, web.FileResponse, "真实索引被兜底空索引顶掉了")
+            self.assertEqual(Path(r._path), d / "self-image" / "index.js")
+        finally:
+            store.ATLAS_DIR = old
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_index_scripts_carry_a_cache_busting_stamp(self):
         """首页里本站**代码**要带 ?v= 版本戳。
 

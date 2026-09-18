@@ -619,7 +619,21 @@ function openAtlasWindow({ node, codexId, query } = {}) {
   imgText.className = "ca-img-text";
   const imgBtn = document.createElement("button");
   imgBtn.className = "ca-img-btn";
-  imgBar.append(imgText, imgBtn);
+  /* 拉挂一次会故意留着已下好的分卷（重试就不用从零再下 1.3 GB），
+     所以得有个地方让它现形、并且一键清掉 —— 否则就是悄悄占着磁盘。 */
+  const imgClearBtn = document.createElement("button");
+  imgClearBtn.className = "ca-img-btn";
+  imgClearBtn.textContent = "清理下载缓存";
+  imgClearBtn.hidden = true;
+  imgBar.append(imgText, imgBtn, imgClearBtn);
+
+  function fmtSize(bytes) {
+    const n = Number(bytes) || 0;
+    if (n >= 1073741824) return (n / 1073741824).toFixed(2) + " GB";
+    if (n >= 1048576) return Math.round(n / 1048576) + " MB";
+    if (n > 0) return Math.max(1, Math.round(n / 1024)) + " KB";
+    return "0";
+  }
 
   let imgPolling = null;
   function stopImgPoll() {
@@ -629,7 +643,16 @@ function openAtlasWindow({ node, codexId, query } = {}) {
 
   function renderImgState(st) {
     const f = st.fetch || {};
+    const tmp = st.tmp || {};
     const busy = ["checking", "tool", "downloading", "extracting"].includes(f.stage);
+
+    /* 有缓存要清的时候，哪怕图已经有了也得把这条摆出来 ——
+       不然那 1.3 GB 就永远看不见。拉取中的不算：那是 worker 正在写的文件。 */
+    const showClear = !busy && (tmp.files || 0) > 0;
+    imgClearBtn.hidden = !showClear;
+    if (showClear) imgClearBtn.textContent = `清理下载缓存（${fmtSize(tmp.bytes)}）`;
+    imgBtn.hidden = false;
+
     if (busy) {
       imgBar.hidden = false;
       imgText.textContent = f.message || "正在拉取例图…";
@@ -653,12 +676,17 @@ function openAtlasWindow({ node, codexId, query } = {}) {
       imgBtn.textContent = "重试";
       return;
     }
-    if (st.count > 0) {       /* 有图了就不打扰 */
+    if (st.count > 0 && !showClear) {     /* 有图、又没缓存要清，就别打扰 */
       imgBar.hidden = true;
       stopImgPoll();
       return;
     }
     imgBar.hidden = false;
+    if (st.count > 0) {
+      imgText.textContent = "上次拉取留下了下载缓存。清掉能腾出磁盘，图本身不受影响";
+      imgBtn.hidden = true;               /* 已经有图了，不用再拉 */
+      return;
+    }
     imgText.textContent = "卡片还没有预览图。可以一键拉取（约 1.3 GB，需联网；不装也能正常用）";
     imgBtn.textContent = "拉取例图";
   }
@@ -667,10 +695,16 @@ function openAtlasWindow({ node, codexId, query } = {}) {
     try {
       const st = await apiGet("/images/status");
       renderImgState(st);
-      if (st.running && !imgPolling) {
-        imgPolling = setInterval(() => {
-          apiGet("/images/status").then(renderImgState).catch(() => {});
-        }, 2000);
+      if (st.running) {
+        if (!imgPolling) {
+          imgPolling = setInterval(() => {
+            apiGet("/images/status").then(renderImgState).catch(() => {});
+          }, 2000);
+        }
+      } else {
+        /* 拉完了 / 拉挂了就把定时器停掉。原来只在 done 和「有图」两条路上停，
+           失败那条路会一直每 2 秒问一次，直到关掉窗口。 */
+        stopImgPoll();
       }
     } catch (err) {
       imgBar.hidden = true;   /* 后端没有这个接口（旧版本）时别摆一条死信息 */
@@ -686,6 +720,19 @@ function openAtlasWindow({ node, codexId, query } = {}) {
     } catch (err) {
       imgBtn.disabled = false;
       toast(`拉取没起来：${err.message}`, "error", 6000);
+    }
+  });
+
+  imgClearBtn.addEventListener("click", async () => {
+    imgClearBtn.disabled = true;
+    try {
+      const r = await apiPost("/images/clean", {});
+      toast(`已清掉下载缓存：${r.files} 个文件，腾出 ${fmtSize(r.freed)}`, "ok", 4500);
+      refreshImgState();
+    } catch (err) {
+      toast(`清理失败：${err.message}`, "error", 5000);
+    } finally {
+      imgClearBtn.disabled = false;
     }
   });
 

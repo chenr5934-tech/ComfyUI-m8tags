@@ -100,12 +100,13 @@ class TestPluginLoad(unittest.TestCase):
         self.assertIn(("POST", "/codex_atlas/self-image/group"), paths, "分组接口没注册，分组只能暂存在本机")
         self.assertIn(("GET", "/codex_atlas/images/status"), paths, "例图状态接口没注册，前端不知道要不要提示「拉取例图」")
         self.assertIn(("POST", "/codex_atlas/images/fetch"), paths, "例图拉取接口没注册，一键拉取就没了")
+        self.assertIn(("POST", "/codex_atlas/images/clean"), paths, "清理接口没注册，拉挂留下的 1.3 GB 下载缓存就没地方清")
 
     def test_all_registered_routes_are_covered_by_this_test(self):
         """路由数量和上面逐条断言的条数要对得上 —— 以后新增接口漏了断言，这里会红。"""
         load_plugin(self.table)
         paths = {(m, p) for m, p, _ in self.table.entries}
-        self.assertEqual(len(paths), 10, f"路由数变了，请补断言：{sorted(paths)}")
+        self.assertEqual(len(paths), 11, f"路由数变了，请补断言：{sorted(paths)}")
 
     def test_node_contract_matches_frontend_constants(self):
         """节点签名是前后端的契约，改坏了前端会静默失效。"""
@@ -129,6 +130,13 @@ class TestPluginLoad(unittest.TestCase):
         self.assertRegex(text, rf'(?m)^const ANY_LABEL = "{re.escape(any_label)}";\s*$')
         self.assertRegex(text, rf'(?m)^const SYNTAX_A1111 = "{re.escape(syntax_options[0])}";\s*$')
         self.assertRegex(text, rf'(?m)^const SYNTAX_NAI = "{re.escape(syntax_options[1])}";\s*$')
+
+    def test_frontend_actually_uses_the_clean_endpoint(self):
+        """后端加了清理接口，前端得真的用上，否则 1.3 GB 缓存还是没地方清。"""
+        text = (PKG_DIR / "js" / "codex_atlas.js").read_text("utf-8")
+        self.assertIn('apiPost("/images/clean"', text, "前端没调清理接口")
+        self.assertIn('apiGet("/images/status"', text, "前端没读状态，就不会知道缓存占了多少")
+        self.assertIn("清理下载缓存", text, "提示条上没有清理按钮")
 
     def test_fetch_download_dir_is_gitignored(self):
         """一键拉取把 1.3 GB 分卷下到插件目录的 bin/ 里。

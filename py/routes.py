@@ -716,6 +716,31 @@ def _images_count(force: bool = False) -> int:
     return n
 
 
+def _fetch_tmp_dir() -> Path:
+    return store.PLUGIN_DIR / "bin" / "_fetch_tmp"
+
+
+def _tmp_usage() -> dict:
+    """下载缓存占了多大地方。
+
+    失败时会故意留着已经下好的分卷（重试就不必从零再来），代价是它真的占磁盘 ——
+    这是个 1.3 GB 量级的东西躺在插件目录里。用户有权看见它，也该有地方一键清掉，
+    所以把占用报给前端，由提示条上的「清理下载缓存」按钮负责清。
+    """
+    d = _fetch_tmp_dir()
+    files = 0
+    total = 0
+    if d.is_dir():
+        for p in d.rglob("*"):
+            if p.is_file():
+                files += 1
+                try:
+                    total += p.stat().st_size
+                except OSError:
+                    pass
+    return {"files": files, "bytes": total, "dir": str(d)}
+
+
 def _set_stage(stage=None, message="", done=None, total=None, error=None):
     """刷新拉取进度。
 
@@ -818,7 +843,7 @@ def _release_parts():
 
 
 def _fetch_worker():
-    tmp = store.PLUGIN_DIR / "bin" / "_fetch_tmp"
+    tmp = _fetch_tmp_dir()
     try:
         _set_stage("checking", "检查 7-Zip 与分卷清单…")
 
@@ -883,8 +908,10 @@ def _fetch_worker():
     except Exception as exc:   # noqa: BLE001
         # 故意不清 bin/_fetch_tmp：已经下完并校验过的分卷留在那儿，再点一次会跳过它们；
         # 半截的 .part 也在，_download 会带着 Range 接着往下写。
+        # 代价是它占着磁盘，所以 status 会把占用量报给前端，提示条上能一键清掉。
         _set_stage("error",
-                   "拉取失败：{}（已下好的分卷留在插件目录 bin/_fetch_tmp，重试会跳过）".format(exc),
+                   "拉取失败：{}（已下好的分卷留在插件目录 bin/_fetch_tmp，重试会跳过；"
+                   "不想留就点「清理下载缓存」）".format(exc),
                    error=str(exc))
     else:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -897,7 +924,37 @@ async def _handle_images_status(request):
         "dir": str(_images_dir()),
         "running": bool(_fetch_thread and _fetch_thread.is_alive()),
         "fetch": dict(_fetch_state),
+        # 拉挂一次就会在插件目录里压下一个 1.3 GB 量级的下载缓存，报出来让用户能看见
+        "tmp": _tmp_usage(),
     })
+
+
+async def _handle_images_clean(request):
+    """清掉下载缓存（bin/_fetch_tmp）—— 分卷、半截的 .part 都在那儿。
+
+    那不是图，图在 atlas/images/，这个接口碰都不碰它。
+    正在拉的时候不给清：那会把 worker 正在写的文件从底下抽走。
+    """
+    if _fetch_thread and _fetch_thread.is_alive():
+        return _json({"ok": False, "error": "正在拉取中，等它停下来再清"}, 409)
+
+    usage = _tmp_usage()
+    shutil.rmtree(_fetch_tmp_dir(), ignore_errors=True)
+    # 顺手收掉 bin/ 下没改完名的半截文件（下 7zr 时中断就是 7zr.exe.part）。
+    # 7zr.exe 本体留着：那是能用的工具，下次拉取还要靠它，且只有 588 KB。
+    for stray in _fetch_tmp_dir().parent.glob("*.part"):
+        try:
+            stray.unlink()
+        except OSError:
+            pass
+    left = _tmp_usage()
+    if left["files"]:
+        return _json({
+            "ok": False,
+            "error": "还有 {} 个文件没删掉（可能被别的程序占着），关掉 ComfyUI 后手动删 {}".format(
+                left["files"], left["dir"]),
+        }, 500)
+    return _json({"ok": True, "freed": usage["bytes"], "files": usage["files"]})
 
 
 async def _handle_images_fetch(request):
@@ -945,6 +1002,7 @@ def register_routes():
     server.routes.post("/codex_atlas/self-image/group")(_handle_self_image_group)
     server.routes.get("/codex_atlas/images/status")(_handle_images_status)
     server.routes.post("/codex_atlas/images/fetch")(_handle_images_fetch)
+    server.routes.post("/codex_atlas/images/clean")(_handle_images_clean)
     return True
 
 

@@ -762,7 +762,11 @@ class TestImagesFetch(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="codex-atlas-fetch-"))
         self._atlas = store.ATLAS_DIR
+        self._plugin = store.PLUGIN_DIR
         store.ATLAS_DIR = self.tmp
+        # 下载缓存落在 <插件目录>/bin/_fetch_tmp —— 这里必须一起改掉，
+        # 否则「清理」类用例会去删真实插件目录里的东西。
+        store.PLUGIN_DIR = self.tmp
         with routes_mod._fetch_lock:
             routes_mod._fetch_state.update({
                 "stage": "idle", "message": "", "done": 0, "total": 0,
@@ -771,6 +775,7 @@ class TestImagesFetch(unittest.TestCase):
 
     def tearDown(self):
         store.ATLAS_DIR = self._atlas
+        store.PLUGIN_DIR = self._plugin
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_status_reports_count_and_shape(self):
@@ -1091,6 +1096,70 @@ class TestImagesFetch(unittest.TestCase):
             self.assertEqual(routes_mod._images_count(), 0, "换了目录还吃旧缓存")
         finally:
             store.ATLAS_DIR = orig
+
+    def test_status_reports_download_cache_usage(self):
+        """拉挂留下的缓存要报出来 —— 1.3 GB 压在插件目录里，用户有权看见。"""
+        tmp = self.tmp / "bin" / "_fetch_tmp"
+        tmp.mkdir(parents=True)
+        (tmp / "m8tags-images.7z.001").write_bytes(b"x" * 1000)
+        (tmp / "m8tags-images.7z.002.part").write_bytes(b"y" * 500)
+
+        data = body_of(call(routes_mod._handle_images_status, "/codex_atlas/images/status"))
+        self.assertEqual(data["tmp"]["files"], 2)
+        self.assertEqual(data["tmp"]["bytes"], 1500)
+
+    def test_status_reports_empty_cache_when_nothing_left(self):
+        data = body_of(call(routes_mod._handle_images_status, "/codex_atlas/images/status"))
+        self.assertEqual(data["tmp"]["files"], 0)
+        self.assertEqual(data["tmp"]["bytes"], 0)
+
+    def test_clean_removes_cache_but_never_touches_images(self):
+        """清理只动下载缓存，绝不许碰 atlas/images/ —— 那里是用户的图。"""
+        tmp = self.tmp / "bin" / "_fetch_tmp"
+        tmp.mkdir(parents=True)
+        (tmp / "m8tags-images.7z.001").write_bytes(b"x" * 1000)
+        (tmp / "m8tags-images.7z.001.part").write_bytes(b"x" * 300)
+
+        shots = self.tmp / "images" / "composition_style"
+        shots.mkdir(parents=True)
+        (shots / "a.jpg").write_bytes(b"real image")
+
+        # 下 7zr 时中断留下的半截文件，以及能用完的 7zr 本体
+        bin_dir = self.tmp / "bin"
+        (bin_dir / "7zr.exe.part").write_bytes(b"half a tool")
+        (bin_dir / "7zr.exe").write_bytes(b"a usable tool")
+
+        r = call(routes_mod._handle_images_clean, "/codex_atlas/images/clean", method="POST")
+        self.assertEqual(r.status, 200)
+        data = body_of(r)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["files"], 2)
+        self.assertEqual(data["freed"], 1300)
+
+        self.assertFalse(tmp.exists(), "缓存目录该被删掉")
+        self.assertTrue((shots / "a.jpg").is_file(), "图被误删了 —— 清理只该碰 bin/_fetch_tmp")
+        self.assertFalse((bin_dir / "7zr.exe.part").is_file(), "半截的 7zr 下载该被收掉")
+        self.assertTrue((bin_dir / "7zr.exe").is_file(), "7zr.exe 是能用的工具，不该被删")
+
+    def test_clean_refuses_while_a_fetch_is_running(self):
+        """拉取中不许清：那会把 worker 正在写的文件从底下抽走。"""
+        tmp = self.tmp / "bin" / "_fetch_tmp"
+        tmp.mkdir(parents=True)
+        (tmp / "m8tags-images.7z.001.part").write_bytes(b"x" * 100)
+
+        class _Alive:
+            def is_alive(self):
+                return True
+
+        orig = routes_mod._fetch_thread
+        routes_mod._fetch_thread = _Alive()
+        try:
+            r = call(routes_mod._handle_images_clean, "/codex_atlas/images/clean", method="POST")
+        finally:
+            routes_mod._fetch_thread = orig
+
+        self.assertEqual(r.status, 409)
+        self.assertTrue((tmp / "m8tags-images.7z.001.part").is_file(), "拒绝的时候不该动文件")
 
     def test_readme_text_exists_for_post_extract_write(self):
         """解压后要写进 images/README.txt 的那段内容必须非空。

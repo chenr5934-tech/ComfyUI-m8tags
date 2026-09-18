@@ -124,6 +124,18 @@ mklink /J "<ComfyUI>\custom_nodes\ComfyUI-CodexAtlas" "<本仓库克隆到的位
 另外解压完成后代码会**显式重写一次 `images/README.txt`**：`atlas/images/` 在解压前就存在
 （仓库里带着这个说明文件），解压是往里合并，所以不能指望它随包进来。
 
+### 拉取失败会留下什么
+
+失败或中断时，**已经下完并且 SHA256 校验通过的分卷会特意留在**插件目录的 `bin/_fetch_tmp/` 里 ——
+再点一次「拉取例图」会直接跳过它们，不必从零再下 1.3 GB；半截的 `.part` 也在那儿，下次带着
+`Range` 接着往下写。图本身不受影响：没解压就不会动 `atlas/images/`。
+
+代价是它真的占磁盘。所以小窗顶部那条提示会显示缓存占用，旁边配一个 `清理下载缓存` 按钮，
+点一下就清掉。正在拉取时这个按钮不出现 —— 那时候清等于把 worker 正在写的文件抽走。
+解压成功后缓存会**自动**清掉，不用管；失败后才有东西可清。
+
+清理只删 `bin/_fetch_tmp`，**绝不碰 `atlas/images/`**（那里是你的图）。
+
 ### 手动下载
 
 **下载页**：https://github.com/chenr5934-tech/ComfyUI-m8tags/releases/tag/images-v1

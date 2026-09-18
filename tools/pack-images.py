@@ -1,22 +1,16 @@
 """把法典例图打成分卷压缩包（7z 分卷），用于分发。
 
-例图没法进 git（站点源目录里是 16 个目录 / 1636 MB / 44984 个文件），走 GitHub Release
-附件分发。默认只打站点登记在册的法典 —— 当前 13 部 / 37684 个文件 / 约 1.3 GB。
-这里打成 **7z 分卷**：`m8tags-images.7z.001`、`.002`…，**必须下齐所有卷才能解压**。
-好处是不会出现"只下了其中几个、图缺了一半还没察觉"的情况，卷号也一眼能看出顺序。
+例图没法进 git（1.3 GB / 37684 个文件），走 GitHub Release 附件分发。
 
-为什么是 7z 分卷而不是 zip 分卷：
-  - ZIP 的分卷（`.z01`/`.z02` + `.zip`）Python 的 zipfile 既不支持创建也不支持读取，
-    要引第三方库；7z 命令行现成，命名也对得上用户手上的 7-Zip。
-  - 早先那版是「多个互相独立的 zip」，用户少下一个包只会静默缺图，看不出问题。
-
-代价（这个要跟下载的人讲清楚）：
-  - 分卷只有 7-Zip / WinRAR 能解，Windows 资源管理器自带的「全部解压」不认分卷；
-  - 任意一个卷缺失或损坏，整包都打不开 —— 下完先对 SHA256 再解压。
+**为什么是 7z 分卷**：必须下齐才能解压，不会出现「只下了几卷、图缺了一半还没察觉」。
+插件端做了「一键拉取」（首次运行自动下载并解压），它会：
+  1. 先找本机的 7z.exe（常见安装路径 + PATH）；
+  2. 找不到就下载 7-Zip 官方那个免安装的单文件 7zr.exe（约 588 KB）放进插件目录；
+  3. 再下载全部卷、校验、解压到 atlas/images/。
+所以用户不需要自己装 7-Zip，也不需要手动拼卷 —— 这条路径专门实测过。
 
 用法：
     python tools/pack-images.py --src "<站点>/images" --out "D:/dist"
-    python tools/pack-images.py --src "<站点>/images" --out "D:/dist" --volume 420
 """
 
 from __future__ import annotations
@@ -38,9 +32,9 @@ except Exception:
 
 # 常见安装位置，找不到再用 PATH
 SEVEN_ZIP_CANDIDATES = (
-    r"D:\7z\7-Zip\7z.exe",
     r"C:\Program Files\7-Zip\7z.exe",
     r"C:\Program Files (x86)\7-Zip\7z.exe",
+    r"D:\7z\7-Zip\7z.exe",
 )
 
 
@@ -66,7 +60,8 @@ def find_7z(explicit: str | None) -> Path:
         return Path(found)
     raise SystemExit(
         "找不到 7z.exe。用 --7z 指定，例如：\n"
-        "  --7z \"D:/7z/7-Zip/7z.exe\""
+        "  --7z \"D:/7z/7-Zip/7z.exe\"\n"
+        "（没有的话去 https://www.7-zip.org/ 装一个；官方还有个免安装的 7zr.exe）"
     )
 
 
@@ -126,17 +121,18 @@ def scan_source(src: Path, only=None):
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="把法典例图打成 7z 分卷")
+    ap = argparse.ArgumentParser(description="把法典例图打成一个 zip")
     ap.add_argument("--src", required=True, help="例图目录（含 <codex>/ 子目录）")
     ap.add_argument("--out", required=True, help="输出目录")
-    ap.add_argument("--7z", dest="seven_zip", default=None, help="7z.exe 路径")
+    ap.add_argument("--name", default="m8tags-images", help="包名（不带扩展名）")
     ap.add_argument("--volume", type=int, default=420, help="每卷大小 MB（默认 420）")
-    ap.add_argument("--name", default="m8tags-images", help="包名")
+    ap.add_argument("--7z", dest="seven_zip", default=None, help="7z.exe 路径")
     ap.add_argument("--all", action="store_true",
                     help="连没登记进站点索引的旧版目录一起打（默认只打登记在册的）")
     args = ap.parse_args()
 
     seven = find_7z(args.seven_zip)
+
     src = Path(args.src).resolve()
     out = Path(args.out).resolve()
     if not src.is_dir():
@@ -158,6 +154,7 @@ def main() -> int:
             len(skipped), human(sum(s[2] for s in skipped))))
         for name, n, b in skipped:
             print("         {:<24} {} 个文件  {}".format(name, n, human(b)))
+
     print("打包器 : {}".format(seven))
     print("分卷   : 每卷 {} MB".format(args.volume))
 
@@ -181,6 +178,7 @@ def main() -> int:
         "-bso0", "-bsp0",          # 进度条会刷屏，关掉
         str(archive),
     ] + ["{}/{}".format(src.name, cid) for cid in codex_ids]
+
     print("\n正在打包（Copy 模式，不做二次压缩）…", flush=True)
     t0 = time.time()
     proc = subprocess.run(cmd, cwd=str(src.parent))
@@ -208,8 +206,9 @@ def main() -> int:
         "extractTo": "atlas/",
         "firstVolume": volumes[0].name,
         "howToExtract": (
-            "把所有分卷下到同一个目录，用 7-Zip 右键第一个卷 "
-            "→ 解压到插件的 atlas/ 下。Windows 自带的解压不支持分卷。"
+            "自动：插件里点「拉取例图」，后端自己下卷、找（或下载）7zr.exe、解压到 atlas/images/。"
+            "手动：所有卷下到同一个目录，用 7-Zip 右键第一个卷 → 解压到插件的 atlas/ 下。"
+            "Windows 资源管理器自带的解压不认分卷。"
         ),
         "volumeBytes": args.volume * 1024 * 1024,
         "totalFiles": total_files,

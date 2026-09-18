@@ -98,12 +98,14 @@ class TestPluginLoad(unittest.TestCase):
         self.assertIn(("POST", "/codex_atlas/self-image"), paths, "存图接口没注册，图库就只能靠手动选文件夹")
         self.assertIn(("POST", "/codex_atlas/self-image/delete"), paths, "删图接口没注册（它走 unlink，不可逆，更要有回归保护）")
         self.assertIn(("POST", "/codex_atlas/self-image/group"), paths, "分组接口没注册，分组只能暂存在本机")
+        self.assertIn(("GET", "/codex_atlas/images/status"), paths, "例图状态接口没注册，前端不知道要不要提示「拉取例图」")
+        self.assertIn(("POST", "/codex_atlas/images/fetch"), paths, "例图拉取接口没注册，一键拉取就没了")
 
     def test_all_registered_routes_are_covered_by_this_test(self):
         """路由数量和上面逐条断言的条数要对得上 —— 以后新增接口漏了断言，这里会红。"""
         load_plugin(self.table)
         paths = {(m, p) for m, p, _ in self.table.entries}
-        self.assertEqual(len(paths), 8, f"路由数变了，请补断言：{sorted(paths)}")
+        self.assertEqual(len(paths), 10, f"路由数变了，请补断言：{sorted(paths)}")
 
     def test_node_contract_matches_frontend_constants(self):
         """节点签名是前后端的契约，改坏了前端会静默失效。"""

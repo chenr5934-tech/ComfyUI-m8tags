@@ -9,12 +9,16 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import random
 import shutil
+import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from functools import partial
 from pathlib import Path
 
@@ -595,6 +599,241 @@ async def _handle_status(request):
     })
 
 
+# ============================================================================
+# 例图自动拉取
+#
+# 例图 1.3 GB，走 GitHub Release 的 7z 分卷。不该要求用户「自己下 4 个卷、装 7-Zip、
+# 解压、放对位置」，所以做成一次点击：
+#   1. 先找本机的 7z.exe（常见安装路径 + PATH）
+#   2. 找不到就下官方那个免安装的 7zr.exe（约 588 KB）放进插件目录 ——
+#      比让人装 7-Zip 轻得多，也不用管理员权限
+#   3. 下齐所有卷（带断点续传），逐个校验 SHA256
+#   4. 解压到 atlas/ —— -aoa 只覆盖同名文件，**不删**用户已有的任何东西
+#   5. 解压完成后显式重写 images/README.txt
+# ============================================================================
+
+_REPO = "chenr5934-tech/ComfyUI-m8tags"
+_RELEASE_TAG = "images-v1"
+_RELEASE_BASE = "https://github.com/{}/releases/download/{}".format(_REPO, _RELEASE_TAG)
+_SEVEN_ZIP_CANDIDATES = (
+    r"C:\Program Files\7-Zip\7z.exe",
+    r"C:\Program Files (x86)\7-Zip\7z.exe",
+    r"D:\7z\7-Zip\7z.exe",
+)
+_7ZR_URL = "https://www.7-zip.org/a/7zr.exe"
+
+# 解压完成后会把这个写进 atlas/images/README.txt。
+# 为什么要显式写：atlas/images/ 在解压前就已经存在（仓库里带着这个说明文件），
+# 解压是往目录里合并、不是重建，所以不能指望它随包进来。
+_IMAGES_README = """配图目录
+========
+
+这里放法典卡片的配图，按法典分目录：
+
+    images/<法典id>/<图片文件名>
+
+由插件里的「拉取例图」下载解压而来（约 1.3 GB / 37684 张），也可以自己往里放。
+没有配图也能正常用：检索、搜索、复制 tag、加入已选栏、推送到节点都不依赖图片，
+卡片上显示占位块而已。
+
+解压只会覆盖同名文件，不会删掉这个目录里别的东西。
+"""
+
+_fetch_lock = threading.Lock()
+_fetch_state = {
+    "stage": "idle",      # idle|checking|tool|downloading|extracting|done|error
+    "message": "",
+    "done": 0,
+    "total": 0,
+    "error": None,
+    "startedAt": 0.0,
+    "usedTool": "",
+}
+_fetch_thread = None
+
+
+def _images_dir() -> Path:
+    return store.ATLAS_DIR / "images"
+
+
+def _images_count() -> int:
+    d = _images_dir()
+    if not d.is_dir():
+        return 0
+    return sum(1 for p in d.rglob("*") if p.is_file() and p.name.lower() != "readme.txt")
+
+
+def _set_stage(stage, message="", done=None, total=None, error=None):
+    with _fetch_lock:
+        _fetch_state["stage"] = stage
+        if message:
+            _fetch_state["message"] = message
+        if done is not None:
+            _fetch_state["done"] = done
+        if total is not None:
+            _fetch_state["total"] = total
+        if error is not None:
+            _fetch_state["error"] = error
+
+
+def _find_7z():
+    """先找本机装的 7-Zip；都没有再看插件目录里以前下过的 7zr。"""
+    for c in _SEVEN_ZIP_CANDIDATES:
+        if Path(c).is_file():
+            return Path(c), "本机已装 7-Zip"
+    which = shutil.which("7z") or shutil.which("7za")
+    if which:
+        return Path(which), "PATH 里的 7z"
+    local = store.PLUGIN_DIR / "bin" / "7zr.exe"
+    if local.is_file():
+        return local, "插件目录里已有的 7zr.exe"
+    return None, ""
+
+
+def _http_get(url, timeout=60):
+    req = urllib.request.Request(url, headers={"User-Agent": "codex-atlas-fetch"})
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def _download(url, dest: Path):
+    """流式下载 + 断点续传。先写 .part 再改名，免得半截文件被当成完整的。"""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_suffix(dest.suffix + ".part")
+    have = part.stat().st_size if part.is_file() else 0
+
+    headers = {"User-Agent": "codex-atlas-fetch"}
+    if have:
+        headers["Range"] = "bytes={}-".format(have)
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        if have and getattr(resp, "status", 200) != 206:
+            have = 0        # 服务器不认 Range，返回的是全量，那就从头写
+        with part.open("ab" if have else "wb") as fh:
+            while True:
+                block = resp.read(1 << 20)
+                if not block:
+                    break
+                fh.write(block)
+    os.replace(part, dest)
+    return dest
+
+
+def _sha256_of(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _release_parts():
+    """分卷名 + 校验和，取自 Release 上的 SHA256SUMS.txt（打包时生成的那份）。"""
+    try:
+        with _http_get("{}/SHA256SUMS.txt".format(_RELEASE_BASE), timeout=30) as r:
+            text = r.read().decode("utf-8", "replace")
+        parts = []
+        for line in text.splitlines():
+            bits = line.strip().split(None, 1)
+            if len(bits) == 2:
+                parts.append((bits[0], bits[1].strip()))
+        if parts:
+            return parts
+    except Exception:   # noqa: BLE001
+        pass
+    # 兜底：按约定拼名字，跳过校验（总比直接失败强）
+    return [("", "m8tags-images.7z.{:03d}".format(i)) for i in range(1, 5)]
+
+
+def _fetch_worker():
+    tmp = store.PLUGIN_DIR / "bin" / "_fetch_tmp"
+    try:
+        _set_stage("checking", "检查 7-Zip 与分卷清单…")
+
+        tool, howfound = _find_7z()
+        if tool is None:
+            _set_stage("tool", "本机没有 7-Zip，正在下载官方免安装版（约 588 KB）…")
+            tool = store.PLUGIN_DIR / "bin" / "7zr.exe"
+            _download(_7ZR_URL, tool)
+            howfound = "刚下载的 7zr.exe"
+        with _fetch_lock:
+            _fetch_state["usedTool"] = "{}（{}）".format(tool, howfound)
+
+        parts = _release_parts()
+        tmp.mkdir(parents=True, exist_ok=True)
+        first = None
+        for idx, (want_sha, name) in enumerate(parts, 1):
+            _set_stage("downloading",
+                       "正在下载 {}/{}：{}".format(idx, len(parts), name),
+                       done=idx - 1, total=len(parts))
+            dest = _download("{}/{}".format(_RELEASE_BASE, name), tmp / name)
+            if want_sha:
+                got = _sha256_of(dest)
+                if got != want_sha:
+                    raise RuntimeError("{} 校验不符（下载可能被截断），可以再点一次重试".format(name))
+            if first is None:
+                first = dest
+            _set_stage(done=idx)
+
+        _set_stage("extracting", "正在解压到 atlas/images/…")
+        target = store.ATLAS_DIR
+        target.mkdir(parents=True, exist_ok=True)
+        # -aoa：只覆盖同名文件。7z 解压是往目标目录里合并，不会删掉别的东西 ——
+        # atlas/images/ 里原有的 README.txt、用户自己放的图都不受影响。
+        cmd = [str(tool), "x", str(first), "-o{}".format(target),
+               "-aoa", "-y", "-bso0", "-bsp0"]
+        proc = subprocess.run(cmd, cwd=str(tmp))
+        if proc.returncode != 0:
+            raise RuntimeError("7z 解压失败，退出码 {}".format(proc.returncode))
+
+        try:
+            (_images_dir() / "README.txt").write_text(_IMAGES_README, encoding="utf-8")
+        except OSError:
+            pass
+
+        n = _images_count()
+        _set_stage("done", "完成：atlas/images/ 里现在有 {} 个文件".format(n),
+                   done=len(parts), total=len(parts))
+    except Exception as exc:   # noqa: BLE001
+        _set_stage("error", "拉取失败：{}".format(exc), error=str(exc))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+async def _handle_images_status(request):
+    return _json({
+        "ok": True,
+        "count": _images_count(),
+        "dir": str(_images_dir()),
+        "running": bool(_fetch_thread and _fetch_thread.is_alive()),
+        "fetch": dict(_fetch_state),
+    })
+
+
+async def _handle_images_fetch(request):
+    global _fetch_thread
+    if _fetch_thread and _fetch_thread.is_alive():
+        return _json({"ok": False, "error": "已经在拉了，等一下再点"}, 409)
+
+    body = {}
+    try:
+        raw = await request.read()
+        if raw:
+            body = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeError):
+        body = {}
+    if not body.get("confirm"):
+        return _json({"ok": False, "error": "需要 confirm=true 才会真的开始下载"}, 400)
+
+    with _fetch_lock:
+        _fetch_state.update({
+            "stage": "checking", "message": "准备中…", "done": 0, "total": 0,
+            "error": None, "startedAt": time.time(), "usedTool": "",
+        })
+    _fetch_thread = threading.Thread(target=_fetch_worker, name="codex-atlas-fetch", daemon=True)
+    _fetch_thread.start()
+    return _json({"ok": True, "started": True})
+
+
 def register_routes():
     """把接口挂到 ComfyUI 的 aiohttp 上。
 
@@ -613,6 +852,8 @@ def register_routes():
     server.routes.post("/codex_atlas/self-image")(_handle_self_image_save)
     server.routes.post("/codex_atlas/self-image/delete")(_handle_self_image_delete)
     server.routes.post("/codex_atlas/self-image/group")(_handle_self_image_group)
+    server.routes.get("/codex_atlas/images/status")(_handle_images_status)
+    server.routes.post("/codex_atlas/images/fetch")(_handle_images_fetch)
     return True
 
 

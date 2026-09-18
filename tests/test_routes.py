@@ -683,5 +683,109 @@ class TestShortFieldMapping(SelfImageTestBase):
             call_static("nope/does-not-exist.jpg")
 
 
+class TestImagesFetch(unittest.TestCase):
+    """例图拉取：状态接口、confirm 门槛，以及几条容易踩的实现细节。
+
+    不联网、不真下载 —— 真的去拉 1.3 GB 不该进单元测试。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="codex-atlas-fetch-"))
+        self._atlas = store.ATLAS_DIR
+        store.ATLAS_DIR = self.tmp
+        with routes_mod._fetch_lock:
+            routes_mod._fetch_state.update({
+                "stage": "idle", "message": "", "done": 0, "total": 0,
+                "error": None, "startedAt": 0.0, "usedTool": "",
+            })
+
+    def tearDown(self):
+        store.ATLAS_DIR = self._atlas
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_status_reports_count_and_shape(self):
+        d = self.tmp / "images" / "composition_style"
+        d.mkdir(parents=True)
+        (d / "a.jpg").write_bytes(b"x")
+        (d / "b.jpg").write_bytes(b"x")
+        (self.tmp / "images" / "README.txt").write_text("说明", "utf-8")
+
+        r = call(routes_mod._handle_images_status, "/codex_atlas/images/status")
+        self.assertEqual(r.status, 200)
+        data = body_of(r)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["count"], 2, "README.txt 不该被算成配图")
+        self.assertIn("fetch", data)
+        self.assertFalse(data["running"])
+
+    def test_count_is_zero_when_dir_missing(self):
+        """atlas/images/ 还不存在时不能炸 —— 首次运行就是这个状态。"""
+        self.assertEqual(routes_mod._images_count(), 0)
+
+    def test_fetch_requires_confirm(self):
+        """没有 confirm 就 400。1.3 GB 的下载不该被一次手滑的请求触发。"""
+        r = call(routes_mod._handle_images_fetch, "/codex_atlas/images/fetch", method="POST")
+        self.assertEqual(r.status, 400)
+        self.assertIn("confirm", body_of(r)["error"])
+
+    def test_find_7z_returns_something_runnable_or_none(self):
+        """探测 7z：本机装了就用本机的，插件目录里有 7zr.exe 就用它。
+
+        两个都没有时返回 (None, "")，让调用方去下载 —— 不能抛异常。
+        """
+        tool, how = routes_mod._find_7z()
+        if tool is None:
+            self.assertEqual(how, "")
+        else:
+            self.assertTrue(Path(tool).is_file(), "返回的工具路径必须真实存在：{}".format(tool))
+            self.assertTrue(how)
+
+    def test_release_parts_parses_checksum_file(self):
+        """SHA256SUMS.txt 是两列（hash + 文件名），中间可能有空行。"""
+        text = "aaa   m8tags-images.7z.001\n\nbbb  m8tags-images.7z.002\n"
+
+        class _Resp:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self):
+                return text.encode("utf-8")
+
+        orig = routes_mod._http_get
+        routes_mod._http_get = lambda *a, **k: _Resp()
+        try:
+            parts = routes_mod._release_parts()
+        finally:
+            routes_mod._http_get = orig
+        self.assertEqual(
+            parts,
+            [("aaa", "m8tags-images.7z.001"), ("bbb", "m8tags-images.7z.002")],
+        )
+
+    def test_release_parts_falls_back_when_offline(self):
+        """取不到清单要退回按约定拼名字，而不是让整件事直接失败。"""
+        def boom(*a, **k):
+            raise OSError("no network")
+
+        orig = routes_mod._http_get
+        routes_mod._http_get = boom
+        try:
+            parts = routes_mod._release_parts()
+        finally:
+            routes_mod._http_get = orig
+        self.assertTrue(parts, "兜底清单不该是空的")
+        self.assertEqual(parts[0][1], "m8tags-images.7z.001")
+
+    def test_readme_text_exists_for_post_extract_write(self):
+        """解压后要写进 images/README.txt 的那段内容必须非空。
+
+        atlas/images/ 解压前就存在（仓库里带着这个文件），解压是往里合并而不是重建，
+        所以这个说明文件得由代码显式补 —— 内容为空就等于没补。
+        """
+        self.assertIn("images/", routes_mod._IMAGES_README)
+        self.assertGreater(len(routes_mod._IMAGES_README.strip()), 50)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

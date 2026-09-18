@@ -259,6 +259,26 @@ async function apiGet(path, params) {
 
 let codexIndexPromise = null;
 
+async function apiPost(path, body) {
+  const url = new URL(API_BASE + path, window.location.origin);
+  let res;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+      cache: "no-store",
+    });
+  } catch (err) {
+    throw new Error(`请求 ${url.pathname} 失败：${err.message}`);
+  }
+  const data = await res.json().catch(() => null);
+  if (!data) throw new Error(`接口返回了非 JSON 内容（HTTP ${res.status}）`);
+  if (data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return data;
+}
+
 function loadCodexIndex(force) {
   if (!codexIndexPromise || force) {
     codexIndexPromise = apiGet("/codexes", force ? { refresh: "1" } : {}).catch(err => {
@@ -350,6 +370,7 @@ function buildAtlasUrl({ codexId, query } = {}) {
 function closeAtlasWindow() {
   if (!atlas.mask) return;
   if (atlas.onKey) window.removeEventListener("keydown", atlas.onKey, true);
+  if (atlas.stopImgPoll) { atlas.stopImgPoll(); atlas.stopImgPoll = null; }
   /* 先掐掉 src 再摘 DOM：站点页面不小，别让它在后台继续加载 */
   if (atlas.frame) atlas.frame.src = "about:blank";
   atlas.mask.remove();
@@ -400,8 +421,22 @@ function ensureAtlasStyle() {
     .codex-atlas-libbar button:hover{background:#115e59;}
     .codex-atlas-libbar button.on{background:transparent;border-color:#14b8a6;
       color:#5eead4;font-weight:400;}
-    .codex-atlas-body{flex:1;display:flex;min-height:0;}
-    .codex-atlas-frame{flex:1;min-width:0;border:0;background:#fff;}
+    /* 例图提示条：只在「一张配图都没有」时出现。它是提示不是入口，
+       所以用暗底 + 琥珀色描边，不抢占图库那条的按钮视觉。
+       注意 [hidden] 那条不能省 —— display:flex 会盖掉 hidden 属性，
+       否则这个条子永远收不起来。 */
+    .codex-atlas-imgbar{display:flex;align-items:center;gap:9px;padding:7px 12px;
+      background:#2a2118;border-bottom:1px solid #78350f;color:#fde68a;flex:none;
+      font:12.5px/1.4 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;}
+    .codex-atlas-imgbar[hidden]{display:none;}
+    .codex-atlas-imgbar .ca-img-text{flex:1;min-width:0;overflow:hidden;
+      text-overflow:ellipsis;white-space:nowrap;}
+    .codex-atlas-imgbar .ca-img-btn{padding:4px 13px;border-radius:6px;cursor:pointer;
+      border:1px solid #d97706;background:#b45309;color:#fffbeb;font-size:12px;
+      font-family:inherit;font-weight:600;white-space:nowrap;transition:background .12s;}
+    .codex-atlas-imgbar .ca-img-btn:hover:not(:disabled){background:#92400e;}
+    .codex-atlas-imgbar .ca-img-btn:disabled{opacity:.6;cursor:default;}
+    .codex-atlas-body{flex:1;display:flex;min-height:0;}    .codex-atlas-frame{flex:1;min-width:0;border:0;background:#fff;}
     .codex-atlas-side{width:334px;flex:none;display:flex;flex-direction:column;
       background:#1f1f23;border-left:1px solid #3f3f46;color:#e4e4e7;
       font:12.5px/1.45 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;}
@@ -570,6 +605,91 @@ function openAtlasWindow({ node, codexId, query } = {}) {
 
   bar.append(title, hint, search, goBtn, openBtn, closeBtn);
 
+  /* ---- 例图提示条 ----
+     例图 1.3 GB，默认不打进仓库，所以首次装完卡片是没预览图的。
+     没配图不影响任何功能（检索/复制/已选栏/推送都照常），所以这里只是提示 + 给个
+     一键拉取的口子：后端自己下分卷、（必要时）下 7zr、解压到 atlas/images/。
+     只有「一张图都没有」时才出现，打扰越小越好。 */
+  const imgBar = document.createElement("div");
+  imgBar.className = "codex-atlas-imgbar";
+  imgBar.hidden = true;
+
+  const imgText = document.createElement("span");
+  imgText.className = "ca-img-text";
+  const imgBtn = document.createElement("button");
+  imgBtn.className = "ca-img-btn";
+  imgBar.append(imgText, imgBtn);
+
+  let imgPolling = null;
+  function stopImgPoll() {
+    if (imgPolling) { clearInterval(imgPolling); imgPolling = null; }
+  }
+  atlas.stopImgPoll = stopImgPoll;   /* 关窗时要停掉轮询，别让定时器一直跑 */
+
+  function renderImgState(st) {
+    const f = st.fetch || {};
+    const busy = ["checking", "tool", "downloading", "extracting"].includes(f.stage);
+    if (busy) {
+      imgBar.hidden = false;
+      imgText.textContent = f.message || "正在拉取例图…";
+      imgBtn.textContent = "进行中…";
+      imgBtn.disabled = true;
+      return;
+    }
+    imgBtn.disabled = false;
+    if (f.stage === "done") {
+      imgBar.hidden = false;
+      imgText.textContent = f.message || "例图已就绪";
+      imgBtn.textContent = "完成";
+      imgBtn.disabled = true;
+      stopImgPoll();
+      setTimeout(() => { imgBar.hidden = true; }, 6000);
+      return;
+    }
+    if (f.stage === "error") {
+      imgBar.hidden = false;
+      imgText.textContent = f.error || "拉取失败";
+      imgBtn.textContent = "重试";
+      return;
+    }
+    if (st.count > 0) {       /* 有图了就不打扰 */
+      imgBar.hidden = true;
+      stopImgPoll();
+      return;
+    }
+    imgBar.hidden = false;
+    imgText.textContent = "卡片还没有预览图。可以一键拉取（约 1.3 GB，需联网；不装也能正常用）";
+    imgBtn.textContent = "拉取例图";
+  }
+
+  async function refreshImgState() {
+    try {
+      const st = await apiGet("/images/status");
+      renderImgState(st);
+      if (st.running && !imgPolling) {
+        imgPolling = setInterval(() => {
+          apiGet("/images/status").then(renderImgState).catch(() => {});
+        }, 2000);
+      }
+    } catch (err) {
+      imgBar.hidden = true;   /* 后端没有这个接口（旧版本）时别摆一条死信息 */
+    }
+  }
+
+  imgBtn.addEventListener("click", async () => {
+    imgBtn.disabled = true;
+    try {
+      await apiPost("/images/fetch", { confirm: true });
+      toast("开始拉取例图，下载期间其它功能照常可用", "ok", 5000);
+      refreshImgState();
+    } catch (err) {
+      imgBtn.disabled = false;
+      toast(`拉取没起来：${err.message}`, "error", 6000);
+    }
+  });
+
+  refreshImgState();
+
   /* ---- 主体：左边站点，右边已选栏 ---- */
   const body = document.createElement("div");
   body.className = "codex-atlas-body";
@@ -629,7 +749,7 @@ function openAtlasWindow({ node, codexId, query } = {}) {
 
   side.append(sideHead, picks, posField.field, negField.field, foot);
   body.append(frame, side);
-  panel.append(bar, libBar, body);
+  panel.append(bar, libBar, imgBar, body);
   mask.appendChild(panel);
   document.body.appendChild(mask);
 

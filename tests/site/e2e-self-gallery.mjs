@@ -13,7 +13,8 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const HERE = import.meta.dirname;
-const SITE = resolve(HERE, "..", "index.html");
+/* 站点源码已经并进插件的 atlas/（独立站点目录不再单独存在），所以站点根是 HERE/../../atlas */
+const SITE = resolve(HERE, "..", "..", "atlas", "index.html");
 const SHOT = join(HERE, "_shot.png");          // 图库全貌
 const SHOT_DETAIL = join(HERE, "_shot-detail.png");   // 详情弹窗
 const SHOT_CONFIRM = join(HERE, "_shot-confirm.png"); // 删除确认框
@@ -50,11 +51,11 @@ function findSample() {
     }
   };
 
-  const selfDir = resolve(HERE, "..", "self-image");
+  const selfDir = resolve(HERE, "..", "..", "atlas", "self-image");
   const own = pick(selfDir);
   if (own) return own;
 
-  const imagesRoot = resolve(HERE, "..", "images");
+  const imagesRoot = resolve(HERE, "..", "..", "atlas", "images");
   try {
     for (const codex of readdirSync(imagesRoot)) {
       const f = pick(join(imagesRoot, codex));

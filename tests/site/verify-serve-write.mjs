@@ -12,7 +12,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const HERE = import.meta.dirname;
-const SITE_DIR = resolve(HERE, "..");
+/* 站点源码已经并进插件的 atlas/，所以站点根是 HERE/../../atlas */
+const SITE_DIR = resolve(HERE, "..", "..", "atlas");
 const SELF_DIR = join(SITE_DIR, "self-image");
 const INDEX_JS = join(SELF_DIR, "index.js");
 const PORT = 9355;

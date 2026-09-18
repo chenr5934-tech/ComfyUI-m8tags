@@ -24,7 +24,10 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# 站点源码已经并进插件的 atlas/（独立站点目录不再单独存在），所以这里指向内置那份。
+# 这份脚本的测试对象就是 atlas/serve.py —— 每个用例都会把 serve.ROOT 指到临时目录，
+# 不会碰到真实站点文件。
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "atlas"))
 import serve  # noqa: E402
 
 
@@ -578,6 +581,37 @@ class TestIndexCacheBusting(ServeTestBase):
         _, body2 = self.get("/index.html")
         stamp2 = re.search(r'gallery\.js\?v=(\d+)', body2.decode("utf-8")).group(1)
         self.assertNotEqual(stamp1, stamp2, "改了脚本文件，版本戳却没变")
+
+
+class TestSelfImageIndexFallback(ServeTestBase):
+    """self-image/index.js 不存在时要回空索引，而不是 404。
+
+    它是图库索引，存过图之后才生成；新装或清空后它不在，而 index.html 里有一条
+    <script src="self-image/index.js"> 会去加载它。真回 404 的话，页面顶部那条自检
+    横幅会误报「脚本没加载成功」，还把人往浏览器缓存上引 —— 实际只是文件还没有。
+    """
+
+    def test_missing_index_returns_empty_meta(self):
+        self.assertFalse((self.tmp / "self-image" / "index.js").is_file(),
+                         "这个用例的前提是索引不存在")
+        status, body = self.get("/self-image/index.js")
+        self.assertEqual(status, 200, "缺索引时不能 404")
+        text = body.decode("utf-8")
+        self.assertIn("window.SELF_META", text)
+        self.assertIn("[]", text)
+
+    def test_existing_index_is_served_verbatim(self):
+        """文件真在的时候要原样发出去，不能被兜底顶掉。"""
+        (self.tmp / "self-image" / "index.js").write_text(
+            'window.SELF_META = [{"file":"a.jpg"}];\n', "utf-8")
+        status, body = self.get("/self-image/index.js")
+        self.assertEqual(status, 200)
+        self.assertIn(b"a.jpg", body, "真实索引被兜底空索引顶掉了")
+
+    def test_other_missing_files_still_404(self):
+        """兜底只针对那一个文件 —— 别的路径该 404 还是 404，别把 404 全吃掉。"""
+        status, _ = self.get("/self-image/nope.js")
+        self.assertEqual(status, 404)
 
 
 if __name__ == "__main__":

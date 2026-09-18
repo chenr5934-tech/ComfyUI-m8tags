@@ -37,7 +37,7 @@ class CodexAtlasTag:
                 }),
                 "codex": ([CODEX_ANY], {
                     "default": CODEX_ANY,
-                    "tooltip": "随机抽词的来源法典，列表实时来自线上站点。",
+                    "tooltip": "随机抽词的来源法典，列表实时来自线上站点。选「全部法典」时不会抽画师词典里的词条；想抽就明确选中那一部。",
                 }),
             },
             "optional": {
@@ -103,7 +103,7 @@ class CodexAtlasClipEncode:
                 }),
                 "codex": ([CODEX_ANY], {
                     "default": CODEX_ANY,
-                    "tooltip": "随机抽词的来源法典，列表实时来自本地数据。",
+                    "tooltip": "随机抽词的来源法典，列表实时来自本地数据。选「全部法典」时不会抽画师词典里的词条；想抽就明确选中那一部。",
                 }),
             },
             "optional": {

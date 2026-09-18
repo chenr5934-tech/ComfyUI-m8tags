@@ -97,6 +97,12 @@ def _entry_payload(codex_id: str, entry: dict, meta: dict | None = None,
     }
 
 
+# 画师词典的 id 前缀。全集随机时默认跳过它们 —— 词典里通篇是画师 tag，
+# 一条"某某画师"的权重抵得上一整套普通词，混进来会让结果高度集中在某个画风上，
+# 而不是"场景 / 构图 / 服装"那种多样化抽法。想要就切下拉，明确指定时照抽。
+ARTIST_CODEX_PREFIX = "artist_"
+
+
 async def _handle_random(request):
     wanted = (request.query.get("codex") or CODEX_ANY).strip()
     include_nsfw = (request.query.get("nsfw") or "").lower() in ("1", "true", "yes")
@@ -107,7 +113,19 @@ async def _handle_random(request):
         return _json({"ok": False, "error": str(exc)}, 500)
 
     if not wanted or wanted == CODEX_ANY:
-        pool = [m for m in metas if m.get("id") and (include_nsfw or not m.get("nsfw"))]
+        # 全部法典模式下默认跳过画师词典（artist_*）：那种词典通篇是画师 tag，
+        # 一条"某某画师"混进随机结果里，人像风格会被整片带偏，跟抽到普通词条的
+        # 感觉完全两码事。想从画师词典抽，就把节点上的「法典来源」切到那一部 ——
+        # 明确指定时不受这条影响（见下面的 else 分支）。
+        pool = [
+            m for m in metas
+            if m.get("id")
+            and not str(m.get("id")).startswith(ARTIST_CODEX_PREFIX)
+            and (include_nsfw or not m.get("nsfw"))
+        ]
+        if not pool:
+            # 只剩画师词典可选时不要把用户堵死，退回全集照样能抽
+            pool = [m for m in metas if m.get("id") and (include_nsfw or not m.get("nsfw"))]
     else:
         pool = [m for m in metas if m.get("id") == wanted]
         if not pool:

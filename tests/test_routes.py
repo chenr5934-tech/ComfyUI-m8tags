@@ -159,6 +159,39 @@ class TestRandomEndpoint(unittest.TestCase):
         self.assertTrue(data["nsfw"])
 
 
+    def test_any_pool_skips_artist_codices(self):
+        """「全部法典」模式下不抽画师词典。
+
+        画师词典通篇是画师 tag，一条就能把整张图的画风带偏，混进随机结果里
+        跟抽到普通词条完全不是一回事。连抽 40 次（若没排除，按 11 部里漏 2 部算
+        期望会撞上约 6 次），一次都不该落到 artist_* 上。
+        """
+        artists = {i for i in _codex_ids() if str(i).startswith(routes_mod.ARTIST_CODEX_PREFIX)}
+        if not artists:
+            self.skipTest("测试数据里没有画师词典")
+        seen = set()
+        for _ in range(40):
+            data = body_of(call(routes_mod._handle_random, "/codex_atlas/random"))
+            self.assertTrue(data["ok"])
+            seen.add(data["codex"])
+            self.assertFalse(
+                str(data["codex"]).startswith(routes_mod.ARTIST_CODEX_PREFIX),
+                "全集随机抽到了画师词典：{}".format(data["codex"]),
+            )
+        self.assertTrue(seen, "一次都没抽到内容")
+
+    def test_artist_codex_still_drawable_when_explicit(self):
+        """明确选中画师词典时要照抽 —— 这条规则不能把人堵死。"""
+        artists = sorted(i for i in _codex_ids() if str(i).startswith(routes_mod.ARTIST_CODEX_PREFIX))
+        if not artists:
+            self.skipTest("测试数据里没有画师词典")
+        cid = artists[0]
+        data = body_of(call(routes_mod._handle_random, "/codex_atlas/random?codex=" + cid))
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["codex"], cid)
+        self.assertTrue(str(data["tags"]).strip())
+
+
 class TestEntryEndpoint(unittest.TestCase):
     """小窗里点「加入已选栏」靠这个接口补齐两个语法版本。"""
 

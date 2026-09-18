@@ -25,6 +25,7 @@
     <span class="brand-dot">◆</span>
     <h1>法典图鉴<span class="brand-sub">本地离线版 · SDXL / Animagine · A1111 语法</span></h1>
   </div>
+  <button id="favBtn" class="self-entry" title="收藏过的词条都在这里，可以按分类翻">★ 我的收藏</button>
   <button id="selfBtn" class="self-entry" title="上传自己生成的图片，解析出底模 / LoRA / 提示词，并查 C 站链接">＋ 我的图库</button>
   <div class="controls">
     <select id="codexSelect" title="选择法典"></select>
@@ -116,6 +117,35 @@
   </div>
 </section>
 
+<!-- 我的收藏：跟「我的图库」并列的全屏视图，结构也照着它来（左分类 + 中卡片）。
+     没有右栏 —— 收藏的是词条，不需要上传区。 -->
+<section id="favView" class="self-view" hidden>
+  <div class="self-head">
+    <h2>我的收藏</h2>
+    <p>点法典卡片右上角的 <strong>☆</strong> 就会收进这里，随时回来拿。</p>
+    <p class="dim">只记「是哪一条」，内容每次按法典现查 —— 法典更新后这里看到的也是最新的，
+      不会留一份过期快照。</p>
+  </div>
+
+  <div class="self-layout">
+    <aside class="self-groups">
+      <div class="self-groups-head">收藏分类</div>
+      <div id="favGroupList"></div>
+      <button id="favGroupNew" class="self-group-new">＋ 新建分类</button>
+      <div class="self-groups-foot" id="favGroupStats"></div>
+    </aside>
+
+    <main class="self-main">
+      <div id="favStatus" class="status"></div>
+      <div id="favResults" class="masonry"></div>
+      <div id="favEmpty" class="empty" hidden>
+        <p>还没有收藏。</p>
+        <p class="dim">在法典里把喜欢的词条点上 ☆ 就会出现在这里；卡片下方的下拉能把它归进分类。</p>
+      </div>
+    </main>
+  </div>
+</section>
+
 <div id="selfConfirm" class="confirm-modal" hidden>
   <div class="confirm-box" role="alertdialog" aria-modal="true" aria-labelledby="selfConfirmTitle">
     <h3 id="selfConfirmTitle"></h3>
@@ -175,6 +205,7 @@
 <script src="gallery-meta.js"></script>
 <script src="app.js"></script>
 <script src="gallery.js"></script>
+<script src="favs.js"></script>
 <script>
 /* 加载自检：缺哪个脚本，就在页面顶上摆一条明明白白的横幅。
  *
@@ -189,6 +220,7 @@
     if (typeof window.SELF_META === 'undefined') miss.push('self-image/index.js');
     if (!window.SelfMeta) miss.push('gallery-meta.js');
     if (!window.SelfGallery) miss.push('gallery.js');
+    if (!window.Favs) miss.push('favs.js');
     if (window.__selfGalleryChecked) {
       /* 二轮自检（图库脚本若在后面补跑成功，把横幅撤掉） */
       if (!miss.length && window.__selfGalleryBanner) {

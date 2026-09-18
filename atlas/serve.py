@@ -85,7 +85,7 @@ def clean_header(value, limit: int = 200) -> str:
 
 # 站点里会被浏览器缓存、又经常改动的资源。伺服首页时给它们打上版本戳。
 SITE_ASSETS = (
-    "app.js", "app.css", "gallery.js", "gallery-meta.js",
+    "app.js", "app.css", "gallery.js", "gallery-meta.js", "favs.js",
     "data/index.js",
 )
 

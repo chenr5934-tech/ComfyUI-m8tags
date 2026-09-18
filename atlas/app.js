@@ -360,7 +360,10 @@ function renderCard(rec) {
     img.className = 'card-img';
     img.loading = 'lazy';
     img.alt = e.title;
-    img.src = `images/${state.codexId}/${encodeURIComponent(e.img)}${e.rev ? '?v=' + encodeURIComponent(e.rev) : ''}`;
+    /* 图片目录取 rec.codexId，没有才退回当前法典 —— 收藏视图会把不同法典的
+       词条混在一起显示，只认 state.codexId 的话那些图全都要去错目录找。 */
+    const imgCodex = rec.codexId || state.codexId;
+    img.src = `images/${imgCodex}/${encodeURIComponent(e.img)}${e.rev ? '?v=' + encodeURIComponent(e.rev) : ''}`;
     img.onerror = () => {
       img.remove();
       imgWrap.appendChild(placeholderEl());
@@ -377,6 +380,24 @@ function renderCard(rec) {
     b.textContent = '新增';
     badges.appendChild(b);
     imgWrap.appendChild(badges);
+  }
+  /* 收藏星标：常驻在右上角（不像复制条要 hover 才出来）—— 收藏是个随时会想点的动作 */
+  if (window.Favs) {
+    const favBtn = document.createElement('button');
+    favBtn.className = 'card-fav';
+    const favCodex = rec.codexId || state.codexId;
+    const on = window.Favs.has(favCodex, e.id);
+    favBtn.textContent = on ? '★' : '☆';
+    favBtn.title = on ? '取消收藏' : '收藏这条';
+    favBtn.classList.toggle('on', on);
+    favBtn.onclick = (ev) => {
+      ev.stopPropagation();          /* 别顺带触发「点卡片复制全部」 */
+      const now = window.Favs.toggle(favCodex, e.id, e.title);
+      favBtn.textContent = now ? '★' : '☆';
+      favBtn.classList.toggle('on', now);
+      favBtn.title = now ? '取消收藏' : '收藏这条';
+    };
+    imgWrap.appendChild(favBtn);
   }
   card.appendChild(imgWrap);
 
@@ -646,5 +667,9 @@ function init() {
   $('empty').hidden = false;
   $('empty').querySelector('p').textContent = '正在初始化…';
 }
+
+/* 收藏模块（favs.js）要用这几个：它得按法典把数据加载回来，并复用同一套卡片
+   渲染 —— 否则收藏里的卡片会和别处长不一样。 */
+window.__qtc = { loadCodex, renderCard, state };
 
 init();

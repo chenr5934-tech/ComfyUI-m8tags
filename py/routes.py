@@ -514,7 +514,7 @@ def _sniff_mime(path: Path) -> str | None:
 # 治的就是"磁盘上文件是对的、浏览器还在跑旧版"——表现成"脚本没跑起来"、
 # "按钮点了没反应"，还特别难往缓存上想。
 _SITE_ASSETS = (
-    "app.js", "app.css", "gallery.js", "gallery-meta.js",
+    "app.js", "app.css", "gallery.js", "gallery-meta.js", "favs.js",
     "data/index.js",
 )
 

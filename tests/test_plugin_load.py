@@ -130,6 +130,15 @@ class TestPluginLoad(unittest.TestCase):
         self.assertRegex(text, rf'(?m)^const SYNTAX_A1111 = "{re.escape(syntax_options[0])}";\s*$')
         self.assertRegex(text, rf'(?m)^const SYNTAX_NAI = "{re.escape(syntax_options[1])}";\s*$')
 
+    def test_fetch_download_dir_is_gitignored(self):
+        """一键拉取把 1.3 GB 分卷下到插件目录的 bin/ 里。
+
+        这条要是漏了，用户手一滑 git add -A，整个包就进仓库了 ——
+        提交体积涨 1.3 GB，push 也基本推不上去。
+        """
+        lines = [ln.strip() for ln in (PKG_DIR / ".gitignore").read_text("utf-8").splitlines()]
+        self.assertIn("bin/", lines, "bin/ 没被忽略：拉取下来的分卷会被提交进仓库")
+
     def test_clip_encode_node_is_ours_not_builtin(self):
         """本插件自己的文本编码节点：输出 CONDITIONING，等于把内置节点那份功能搬过来，
         按钮长在它自己身上 —— 不是去改 ComfyUI 的 CLIPTextEncode。"""

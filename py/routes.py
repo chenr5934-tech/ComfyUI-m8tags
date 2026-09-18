@@ -689,11 +689,31 @@ def _images_dir() -> Path:
     return store.ATLAS_DIR / "images"
 
 
-def _images_count() -> int:
+_COUNT_TTL = 5.0
+_count_cache = {"at": 0.0, "n": 0, "dir": None}
+
+
+def _images_count(force: bool = False) -> int:
+    """数 atlas/images/ 下的配图（不含说明文件）。
+
+    4.5 万个文件，实测一次 rglob 要 0.45 秒；而前端每 2 秒就会来问一次
+    （拉取期间靠 status 轮询进度），照原样等于让后端一直半秒半秒地翻目录。
+    加个 5 秒短缓存：拉取收尾时强制重算一次，轮询期间最多 5 秒遍历一回。
+    缓存带上目录路径 —— 目录一换（换 config、跑测试用的临时目录）就当没缓存。
+    """
     d = _images_dir()
+    now = time.time()
+    if (not force and _count_cache["dir"] == str(d)
+            and now - _count_cache["at"] < _COUNT_TTL):
+        return _count_cache["n"]
+
     if not d.is_dir():
-        return 0
-    return sum(1 for p in d.rglob("*") if p.is_file() and p.name.lower() != "readme.txt")
+        n = 0
+    else:
+        n = sum(1 for p in d.rglob("*") if p.is_file() and p.name.lower() != "readme.txt")
+
+    _count_cache.update({"at": now, "n": n, "dir": str(d)})
+    return n
 
 
 def _set_stage(stage=None, message="", done=None, total=None, error=None):
@@ -746,7 +766,19 @@ def _download(url, dest: Path):
     if have:
         headers["Range"] = "bytes={}-".format(have)
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    try:
+        resp = urllib.request.urlopen(req, timeout=60)
+    except urllib.error.HTTPError as exc:
+        # 416「区间越界」只有一种常见成因：.part 已经装下了整个文件 ——
+        # 上一次下完了、但还没走到改名就被中断（关掉 ComfyUI、断电）。
+        # 这不是失败，按「下完了」处理。真假交给上层的 SHA256 判：
+        # 判不过就再点一次，那时 part 已经改名走了，从头下，自愈。
+        # 不加这一条的话，这里会永远 416，重试多少次都一样。
+        if exc.code == 416 and have:
+            os.replace(part, dest)
+            return dest
+        raise
+    with resp:
         if have and getattr(resp, "status", 200) != 206:
             have = 0        # 服务器不认 Range，返回的是全量，那就从头写
         with part.open("ab" if have else "wb") as fh:
@@ -845,7 +877,7 @@ def _fetch_worker():
         except OSError:
             pass
 
-        n = _images_count()
+        n = _images_count(force=True)
         _set_stage("done", "完成：atlas/images/ 里现在有 {} 个文件".format(n),
                    done=len(parts), total=len(parts))
     except Exception as exc:   # noqa: BLE001

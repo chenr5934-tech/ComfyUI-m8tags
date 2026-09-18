@@ -1013,6 +1013,85 @@ class TestImagesFetch(unittest.TestCase):
         self.assertEqual(routes_mod._fetch_state["stage"], "error")
         self.assertIn("校验不符", routes_mod._fetch_state["error"])
 
+    def test_download_treats_416_as_already_complete(self):
+        """`.part` 已经装满整个文件时服务器回 416。
+
+        成因是「下完了、但还没走到改名就被中断」——关掉 ComfyUI、断电都算。
+        不能把它当失败：当失败就会永远卡在 416，重试多少次都一样。
+        这里断言它按「下完了」处理，把 .part 改名成正式文件。
+        """
+        dest = self.tmp / "m8tags-images.7z.001"
+        part = dest.with_suffix(dest.suffix + ".part")
+        part.write_bytes(b"whole file already on disk")
+
+        def fake_urlopen(req, timeout=None):
+            raise routes_mod.urllib.error.HTTPError(
+                req.full_url, 416, "Requested Range Not Satisfiable", {}, None)
+
+        orig = routes_mod.urllib.request.urlopen
+        routes_mod.urllib.request.urlopen = fake_urlopen
+        try:
+            got = routes_mod._download("https://example.invalid/x", dest)
+        finally:
+            routes_mod.urllib.request.urlopen = orig
+
+        self.assertEqual(got, dest)
+        self.assertTrue(dest.is_file(), "应该把 .part 改名成正式文件")
+        self.assertEqual(dest.read_bytes(), b"whole file already on disk")
+        self.assertFalse(part.exists(), ".part 应该已经改名走了")
+        self.assertEqual(routes_mod._sha256_of(dest),
+                         routes_mod._sha256_of(dest), "内容交给上层 SHA256 去判")
+
+    def test_download_reports_other_http_errors(self):
+        """416 之外的 HTTP 错误照旧抛出去 —— 别把真失败也吞成「下完了」。"""
+        dest = self.tmp / "m8tags-images.7z.001"
+        part = dest.with_suffix(dest.suffix + ".part")
+        part.write_bytes(b"half a file")
+
+        def fake_urlopen(req, timeout=None):
+            raise routes_mod.urllib.error.HTTPError(
+                req.full_url, 404, "Not Found", {}, None)
+
+        orig = routes_mod.urllib.request.urlopen
+        routes_mod.urllib.request.urlopen = fake_urlopen
+        try:
+            with self.assertRaises(routes_mod.urllib.error.HTTPError):
+                routes_mod._download("https://example.invalid/x", dest)
+        finally:
+            routes_mod.urllib.request.urlopen = orig
+        self.assertFalse(dest.exists(), "失败时不该生成正式文件")
+
+    def test_images_count_is_cached_until_forced(self):
+        """status 每 2 秒被问一次，而数一遍 4.5 万个文件实测要 0.45 秒 —— 必须缓存。
+
+        拉取收尾时用 force 拿到真实数字，轮询期间不许反复翻目录。
+        """
+        d = self.tmp / "images"
+        d.mkdir(parents=True)
+        (d / "a.jpg").write_bytes(b"x")
+        self.assertEqual(routes_mod._images_count(force=True), 1)
+
+        (d / "b.jpg").write_bytes(b"x")
+        self.assertEqual(routes_mod._images_count(), 1, "5 秒内该走缓存，不重新遍历")
+        self.assertEqual(routes_mod._images_count(force=True), 2, "force 要能立刻看到新文件")
+
+    def test_count_cache_does_not_leak_across_dirs(self):
+        """缓存必须认目录：换了目录（换 config、或者测试用临时目录）就当没缓存。"""
+        a = self.tmp / "a" / "images"
+        a.mkdir(parents=True)
+        (a / "1.jpg").write_bytes(b"x")
+        b = self.tmp / "b" / "images"
+        b.mkdir(parents=True)
+
+        orig = store.ATLAS_DIR
+        try:
+            store.ATLAS_DIR = self.tmp / "a"
+            self.assertEqual(routes_mod._images_count(), 1)
+            store.ATLAS_DIR = self.tmp / "b"
+            self.assertEqual(routes_mod._images_count(), 0, "换了目录还吃旧缓存")
+        finally:
+            store.ATLAS_DIR = orig
+
     def test_readme_text_exists_for_post_extract_write(self):
         """解压后要写进 images/README.txt 的那段内容必须非空。
 

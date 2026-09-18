@@ -847,6 +847,172 @@ class TestImagesFetch(unittest.TestCase):
         self.assertTrue(parts, "兜底清单不该是空的")
         self.assertEqual(parts[0][1], "m8tags-images.7z.001")
 
+    def test_set_stage_can_update_progress_only(self):
+        """只推进进度、不动阶段 —— 每下完一个分卷都会这么调一次。
+
+        早先 stage 是必填位置参数，`_set_stage(done=idx)` 直接 TypeError，
+        表现成「第一个卷下完就报拉取失败」。单看下卷、校验、解压每一步都是好的，
+        所以这条得单独盯住。
+        """
+        routes_mod._set_stage("downloading", "下载中", done=0, total=4)
+        routes_mod._set_stage(done=1)
+        self.assertEqual(routes_mod._fetch_state["stage"], "downloading", "阶段不该被进度更新抹掉")
+        self.assertEqual(routes_mod._fetch_state["done"], 1)
+        self.assertEqual(routes_mod._fetch_state["message"], "下载中", "提示文字不该被进度更新抹掉")
+
+    def test_fetch_worker_completes_end_to_end(self):
+        """整条拉取流程走一遍真代码：找 7z → 取清单 → 逐个下载 → 校验 → 解压。
+
+        只有下载和解压换成替身（不联网、不真解压），流程本身不替身 ——
+        跨函数的那种错（比如「只更新进度」的调用签名不对）只有整条跑起来才暴露。
+        """
+        parts = [("", "m8tags-images.7z.001"), ("", "m8tags-images.7z.002")]
+        seen_done = []
+        downloads = []
+
+        def fake_download(url, dest):
+            seen_done.append(routes_mod._fetch_state["done"])
+            downloads.append(url)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"fake")
+            return dest
+
+        class _Proc:
+            returncode = 0
+
+        tool = self.tmp / "7z.exe"
+        tool.write_bytes(b"fake")
+
+        orig = (routes_mod._find_7z, routes_mod._release_parts, routes_mod._download,
+                routes_mod.subprocess.run, store.PLUGIN_DIR)
+        routes_mod._find_7z = lambda: (tool, "替身")
+        routes_mod._release_parts = lambda: parts
+        routes_mod._download = fake_download
+        routes_mod.subprocess.run = lambda *a, **k: _Proc()
+        store.PLUGIN_DIR = self.tmp
+        try:
+            routes_mod._fetch_worker()
+        finally:
+            (routes_mod._find_7z, routes_mod._release_parts, routes_mod._download,
+             routes_mod.subprocess.run, store.PLUGIN_DIR) = orig
+
+        state = dict(routes_mod._fetch_state)
+        self.assertEqual(state["stage"], "done", "流程没跑完：{}".format(state))
+        self.assertIsNone(state["error"], "流程报错了：{}".format(state))
+        self.assertEqual(state["done"], 2)
+        self.assertEqual(state["total"], 2)
+        self.assertEqual(len(downloads), 2, "两个卷都要下")
+        self.assertEqual(seen_done, [0, 1], "下第二个卷之前，进度应该已经推进到 1")
+        self.assertTrue((self.tmp / "images" / "README.txt").is_file(),
+                        "解压后要补回 images/README.txt")
+
+    def test_fetch_worker_skips_already_verified_parts(self):
+        """上一轮下完并校验过的分卷要跳过重下。
+
+        1.3 GB 的东西，因为后面某一步失败就整套重来，代价太大。
+        """
+        name = "m8tags-images.7z.001"
+        tmp = self.tmp / "bin" / "_fetch_tmp"
+        tmp.mkdir(parents=True)
+        (tmp / name).write_bytes(b"downloaded by a previous attempt")
+        sha = routes_mod._sha256_of(tmp / name)
+
+        downloads = []
+
+        def fake_download(url, dest):
+            downloads.append(url)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"fake")
+            return dest
+
+        class _Proc:
+            returncode = 0
+
+        tool = self.tmp / "7z.exe"
+        tool.write_bytes(b"fake")
+
+        orig = (routes_mod._find_7z, routes_mod._release_parts, routes_mod._download,
+                routes_mod.subprocess.run, store.PLUGIN_DIR)
+        routes_mod._find_7z = lambda: (tool, "替身")
+        routes_mod._release_parts = lambda: [(sha, name)]
+        routes_mod._download = fake_download
+        routes_mod.subprocess.run = lambda *a, **k: _Proc()
+        store.PLUGIN_DIR = self.tmp
+        try:
+            routes_mod._fetch_worker()
+        finally:
+            (routes_mod._find_7z, routes_mod._release_parts, routes_mod._download,
+             routes_mod.subprocess.run, store.PLUGIN_DIR) = orig
+
+        self.assertEqual(downloads, [], "已经校验过的卷不该再下一次")
+        self.assertEqual(routes_mod._fetch_state["stage"], "done")
+
+    def test_fetch_worker_keeps_parts_when_it_fails(self):
+        """失败时不许把已下好的分卷清掉 —— 清了，重试就等于从零再来。"""
+        name = "m8tags-images.7z.001"
+
+        def fake_download(url, dest):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"downloaded fine")
+            return dest
+
+        class _BadProc:
+            returncode = 1        # 解压这一步失败，下载本身是好的
+
+        tool = self.tmp / "7z.exe"
+        tool.write_bytes(b"fake")
+
+        orig = (routes_mod._find_7z, routes_mod._release_parts, routes_mod._download,
+                routes_mod.subprocess.run, store.PLUGIN_DIR)
+        routes_mod._find_7z = lambda: (tool, "替身")
+        routes_mod._release_parts = lambda: [("", name)]
+        routes_mod._download = fake_download
+        routes_mod.subprocess.run = lambda *a, **k: _BadProc()
+        store.PLUGIN_DIR = self.tmp
+        try:
+            routes_mod._fetch_worker()
+        finally:
+            (routes_mod._find_7z, routes_mod._release_parts, routes_mod._download,
+             routes_mod.subprocess.run, store.PLUGIN_DIR) = orig
+
+        self.assertEqual(routes_mod._fetch_state["stage"], "error")
+        self.assertIn("7z 解压失败", routes_mod._fetch_state["error"])
+        self.assertTrue((self.tmp / "bin" / "_fetch_tmp" / name).is_file(),
+                        "已下好的分卷被清掉了，重试要从零再下 1.3 GB")
+        self.assertIn("_fetch_tmp", routes_mod._fetch_state["message"],
+                      "得告诉用户东西留在哪、重试会跳过")
+
+    def test_fetch_worker_reports_checksum_mismatch(self):
+        """校验不符要停下并给出可读原因，不能默默解压一个坏包。"""
+        parts = [("deadbeef", "m8tags-images.7z.001")]
+
+        def fake_download(url, dest):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"not the real thing")
+            return dest
+
+        class _Proc:
+            returncode = 0
+
+        tool = self.tmp / "7z.exe"
+        tool.write_bytes(b"fake")
+
+        orig = (routes_mod._find_7z, routes_mod._release_parts, routes_mod._download,
+                routes_mod.subprocess.run, store.PLUGIN_DIR)
+        routes_mod._find_7z = lambda: (tool, "替身")
+        routes_mod._release_parts = lambda: parts
+        routes_mod._download = fake_download
+        routes_mod.subprocess.run = lambda *a, **k: _Proc()
+        store.PLUGIN_DIR = self.tmp
+        try:
+            routes_mod._fetch_worker()
+        finally:
+            (routes_mod._find_7z, routes_mod._release_parts, routes_mod._download,
+             routes_mod.subprocess.run, store.PLUGIN_DIR) = orig
+
+        self.assertEqual(routes_mod._fetch_state["stage"], "error")
+        self.assertIn("校验不符", routes_mod._fetch_state["error"])
+
     def test_readme_text_exists_for_post_extract_write(self):
         """解压后要写进 images/README.txt 的那段内容必须非空。
 

@@ -696,9 +696,17 @@ def _images_count() -> int:
     return sum(1 for p in d.rglob("*") if p.is_file() and p.name.lower() != "readme.txt")
 
 
-def _set_stage(stage, message="", done=None, total=None, error=None):
+def _set_stage(stage=None, message="", done=None, total=None, error=None):
+    """刷新拉取进度。
+
+    stage 允许省略：每下完一个分卷只推进 done 计数，阶段还是「downloading」。
+    早先这里把 stage 写成了必填位置参数，`_set_stage(done=idx)` 直接抛
+    TypeError —— 表现为「第一个卷下完就报拉取失败」，而下卷、校验、解压
+    每个单独的步骤看起来都是好的。
+    """
     with _fetch_lock:
-        _fetch_state["stage"] = stage
+        if stage:
+            _fetch_state["stage"] = stage
         if message:
             _fetch_state["message"] = message
         if done is not None:
@@ -795,14 +803,22 @@ def _fetch_worker():
         tmp.mkdir(parents=True, exist_ok=True)
         first = None
         for idx, (want_sha, name) in enumerate(parts, 1):
-            _set_stage("downloading",
-                       "正在下载 {}/{}：{}".format(idx, len(parts), name),
-                       done=idx - 1, total=len(parts))
-            dest = _download("{}/{}".format(_RELEASE_BASE, name), tmp / name)
-            if want_sha:
-                got = _sha256_of(dest)
-                if got != want_sha:
-                    raise RuntimeError("{} 校验不符（下载可能被截断），可以再点一次重试".format(name))
+            dest = tmp / name
+            if want_sha and dest.is_file() and _sha256_of(dest) == want_sha:
+                # 上一轮已经下完并校验过的卷：直接用，不重下。
+                # 1.3 GB 的包，失败一次就从零再来一遍太亏。
+                _set_stage("downloading",
+                           "已有 {}/{}：{}（跳过重下）".format(idx, len(parts), name),
+                           done=idx - 1, total=len(parts))
+            else:
+                _set_stage("downloading",
+                           "正在下载 {}/{}：{}".format(idx, len(parts), name),
+                           done=idx - 1, total=len(parts))
+                dest = _download("{}/{}".format(_RELEASE_BASE, name), dest)
+                if want_sha:
+                    got = _sha256_of(dest)
+                    if got != want_sha:
+                        raise RuntimeError("{} 校验不符（下载可能被截断），可以再点一次重试".format(name))
             if first is None:
                 first = dest
             _set_stage(done=idx)
@@ -812,6 +828,7 @@ def _fetch_worker():
         target.mkdir(parents=True, exist_ok=True)
         # -aoa：只覆盖同名文件。7z 解压是往目标目录里合并，不会删掉别的东西 ——
         # atlas/images/ 里原有的 README.txt、用户自己放的图都不受影响。
+        # 只喂第一个卷：分卷是同一个包切开的多段，7z 认了 .001 会自己去接后面的。
         cmd = [str(tool), "x", str(first), "-o{}".format(target),
                "-aoa", "-y", "-bso0", "-bsp0"]
         proc = subprocess.run(cmd, cwd=str(tmp))
@@ -819,7 +836,12 @@ def _fetch_worker():
             raise RuntimeError("7z 解压失败，退出码 {}".format(proc.returncode))
 
         try:
-            (_images_dir() / "README.txt").write_text(_IMAGES_README, encoding="utf-8")
+            # 先建目录再写：解压包里本该带着 images/ 这一层，但那是包的内部结构，
+            # 不该假设它一定在 —— 少了它 write_text 会 FileNotFoundError，
+            # 然后被下面的 except 默默吞掉，说明文件就凭空不见了。
+            img_dir = _images_dir()
+            img_dir.mkdir(parents=True, exist_ok=True)
+            (img_dir / "README.txt").write_text(_IMAGES_README, encoding="utf-8")
         except OSError:
             pass
 
@@ -827,8 +849,12 @@ def _fetch_worker():
         _set_stage("done", "完成：atlas/images/ 里现在有 {} 个文件".format(n),
                    done=len(parts), total=len(parts))
     except Exception as exc:   # noqa: BLE001
-        _set_stage("error", "拉取失败：{}".format(exc), error=str(exc))
-    finally:
+        # 故意不清 bin/_fetch_tmp：已经下完并校验过的分卷留在那儿，再点一次会跳过它们；
+        # 半截的 .part 也在，_download 会带着 Range 接着往下写。
+        _set_stage("error",
+                   "拉取失败：{}（已下好的分卷留在插件目录 bin/_fetch_tmp，重试会跳过）".format(exc),
+                   error=str(exc))
+    else:
         shutil.rmtree(tmp, ignore_errors=True)
 
 

@@ -910,6 +910,8 @@ class TestImagesFetch(unittest.TestCase):
         self.assertEqual(seen_done, [0, 1], "下第二个卷之前，进度应该已经推进到 1")
         self.assertTrue((self.tmp / "images" / "README.txt").is_file(),
                         "解压后要补回 images/README.txt")
+        self.assertFalse((self.tmp / "bin" / "_fetch_tmp").exists(),
+                         "图装好之后压缩包该被清掉 —— 不然 1.3 GB 分卷一直躺在插件目录里")
 
     def test_fetch_worker_skips_already_verified_parts(self):
         """上一轮下完并校验过的分卷要跳过重下。

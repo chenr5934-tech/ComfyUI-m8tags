@@ -914,6 +914,9 @@ def _fetch_worker():
                    "不想留就点「清理下载缓存」）".format(exc),
                    error=str(exc))
     else:
+        # 进到 else 说明 try 整块没抛异常：图已经解进 atlas/images/ 了，
+        # 那 1.3 GB 的压缩包留着没意义，连目录一起删掉 —— 装完就是零残留。
+        # （失败那条路反过来，故意留着分卷好让重试跳过，见上面的 except。）
         shutil.rmtree(tmp, ignore_errors=True)
 
 

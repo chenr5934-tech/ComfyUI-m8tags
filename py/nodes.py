@@ -18,6 +18,7 @@ class CodexAtlasTag:
     """法典图鉴 · 提示词
 
     点「随机提示词」从线上法典抽一条填进框里；
+    点「运行自动随机」打开开关后，每次运行工作流都会自动换一批新词；
     点「前往词典站寻找灵感」在 ComfyUI 页面内开小窗浏览站点。
     """
 
@@ -29,7 +30,7 @@ class CodexAtlasTag:
                     "multiline": True,
                     "default": "",
                     "dynamicPrompts": False,
-                    "tooltip": "提示词。点「随机提示词」自动填入，也可以直接手改。",
+                    "tooltip": "提示词。点「随机提示词」自动填入，也可以直接手改；开着「运行自动随机」时每次运行都会重新抽一条覆盖这里。",
                 }),
                 "syntax": (list(SYNTAX_OPTIONS), {
                     "default": SYNTAX_A1111,
@@ -54,7 +55,7 @@ class CodexAtlasTag:
     RETURN_NAMES = ("positive", "negative")
     FUNCTION = "emit"
     CATEGORY = "法典图鉴"
-    DESCRIPTION = "把在线 NovelAI 提示词法典接进 ComfyUI：随机抽词、NAI↔A1111 语法转换、站内小窗浏览。"
+    DESCRIPTION = "把在线 NovelAI 提示词法典接进 ComfyUI：运行前自动随机抽词、NAI↔A1111 语法转换、站内小窗浏览。"
     OUTPUT_NODE = False
 
     @classmethod
@@ -120,7 +121,7 @@ class CodexAtlasClipEncode:
     RETURN_NAMES = ("positive", "negative")
     FUNCTION = "encode"
     CATEGORY = "法典图鉴"
-    DESCRIPTION = "带法典图鉴按钮的文本编码节点：随机抽词、NAI↔A1111 语法切换、站内找灵感，输出正负两路 CONDITIONING。"
+    DESCRIPTION = "带法典图鉴按钮的文本编码节点：开着「运行自动随机」每次运行自动换词、NAI↔A1111 语法切换、站内找灵感，输出正负两路 CONDITIONING。"
     OUTPUT_NODE = False
 
     @classmethod

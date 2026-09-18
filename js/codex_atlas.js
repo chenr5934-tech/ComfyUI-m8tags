@@ -1,7 +1,8 @@
 /* ============================================================================
  * 法典图鉴 · ComfyUI 节点前端
  *
- * 节点形态：tag 框 → [前往词典站寻找灵感] → [随机提示词] → 语法切换 → 法典来源 → 负向框
+ * 节点形态：tag 框 → [前往词典站寻找灵感] → [随机提示词] → [运行自动随机 开/关]
+ *           → 语法切换 → 法典来源 → 负向框
  *
  * 数据一律实时来自线上站点（经后端同源接口，绕开 CORS），
  * 站点更新后插件不用改，新法典会自动出现在下拉里。
@@ -1050,15 +1051,22 @@ function applyRendered(node, rendered) {
   }
 }
 
+/* 抽一条词写进框里。手点按钮和「运行自动随机」共用这一条路径 ——
+   框里看到的就是提交出去的那份，不会出现"自动抽只改后端、界面留着旧词"的两套行为。 */
+async function drawOnce(node) {
+  const entry = await apiGet("/random", { codex: currentCodexId(node) });
+  const rendered = renderEntry(node, entry);
+  applyRendered(node, rendered);
+  return { entry, rendered };
+}
+
 async function onRandom(node) {
   /* 连点会并发出请求，后到的结果覆盖先到的；直接挡住重复触发 */
   if (node.__codexAtlasBusy) return;
   node.__codexAtlasBusy = true;
   toast("正在从本地法典抽词…", "info", 1400);
   try {
-    const entry = await apiGet("/random", { codex: currentCodexId(node) });
-    const rendered = renderEntry(node, entry);
-    applyRendered(node, rendered);
+    const { entry, rendered } = await drawOnce(node);
 
     if (readSyntax(node) === SYNTAX_NAI && !entry.tagsNai) {
       toast("该词条没有原始 NAI 版本，已按 A1111 显示", "info", 4200);
@@ -1073,6 +1081,93 @@ async function onRandom(node) {
   } finally {
     node.__codexAtlasBusy = false;
   }
+}
+
+/* ============================================================================
+ * 五之二、运行前自动随机
+ *
+ * 「每次跑都换一批词」不该靠人手点：手动点一次，抽到的那条就定住了，想再换还得
+ * 再点一次，一晚上要点几十回。
+ *
+ * 挂点选 app.queuePrompt —— 前端所有运行入口最后都从这里过（Run 按钮、
+ * Ctrl+Enter、Queue Front、只跑选中的输出节点、队列空时的自动续跑），
+ * 在它真正提交之前把词抽好，于是提交上去的就是界面上看得见的那一份。
+ *
+ * 为什么不放 Python 节点里抽：语法转换（NAI ↔ A1111）和「框里所见即输出」
+ * 这两件事都在前端。后端抽词会让框里留着上一次的内容、实际跑的是新词，
+ * 抽到什么只能靠翻日志猜。
+ * ==========================================================================*/
+
+const AUTORANDOM_PROP = "codexAtlasAutoRandom";
+
+function readAutoRandom(node) {
+  return node?.properties?.[AUTORANDOM_PROP] === true;
+}
+
+function writeAutoRandom(node, value) {
+  node.properties = node.properties || {};
+  /* 存 properties，不存 widget 值：按钮 widget 的值不参与工作流序列化，
+     存那儿的话存了等于没存，重开一次开关就自己关了。 */
+  node.properties[AUTORANDOM_PROP] = !!value;
+}
+
+function autoRandomLabel(node) {
+  return readAutoRandom(node)
+    ? "运行自动随机：开（点击关闭）"
+    : "运行自动随机：关（点击开启）";
+}
+
+function toggleAutoRandom(node) {
+  const next = !readAutoRandom(node);
+  writeAutoRandom(node, next);
+  const btn = node.__codexAtlasAutoBtn;
+  if (btn) btn.name = autoRandomLabel(node);
+  toast(next ? "这个节点以后每次运行都会重新抽词" : "已关掉：改回手动点「随机提示词」", "info", 3000);
+  app.graph?.setDirtyCanvas(true, true);
+}
+
+/* 抽词本身失败（后端没起来、法典数据不在）不该拦住整条工作流 ——
+   报一声，然后照常提交，让用户自己决定要不要停下来查。 */
+async function autoRandomAllNodes() {
+  const all = app.graph?._nodes;
+  if (!Array.isArray(all) || !all.length) return 0;
+  /* 正被手点抽着的节点跳过，免得两边同时写同一个框 */
+  const targets = all.filter(n => readAutoRandom(n) && widgetByName(n, "text") && !n.__codexAtlasBusy);
+  if (!targets.length) return 0;
+
+  const results = await Promise.allSettled(targets.map(n => drawOnce(n)));
+  const failed = results.filter(r => r.status === "rejected");
+  if (failed.length) {
+    const reason = failed[0].reason;
+    toast(
+      `运行前自动随机失败 ${failed.length} 个节点：${reason?.message || reason}\n（已按框里现有内容运行）`,
+      "error",
+      6000,
+    );
+  }
+  app.graph?.setDirtyCanvas(true, true);
+  return targets.length - failed.length;
+}
+
+function installAutoRandomHook() {
+  if (app.__codexAtlasAutoHooked) return;
+  const prev = app.queuePrompt;
+  if (typeof prev !== "function") {
+    /* 将来前端改名了也不要静默失效 —— 工作流照跑，只是不再自动换词 */
+    console.warn("[法典图鉴] 找不到 app.queuePrompt，运行前自动随机未启用（手动点「随机提示词」不受影响）");
+    return;
+  }
+  app.__codexAtlasAutoHooked = true;
+  app.queuePrompt = async function (...args) {
+    /* 随机失败也要放行：宁可跑一次框里的旧词，也不要把运行整个吞掉 */
+    try {
+      await autoRandomAllNodes();
+    } catch (err) {
+      console.warn("[法典图鉴] 运行前自动随机出错：", err);
+      toast(`运行前自动随机出错：${err.message}`, "error", 5000);
+    }
+    return prev.apply(this, args);
+  };
 }
 
 function onOpenAtlas(node) {
@@ -1090,13 +1185,17 @@ function moveWidgetsAfter(node, widgets, index) {
   list.splice(index, 0, ...widgets);
 }
 
-/* 挂两个按钮。不依赖 addWidget 的返回值（各 ComfyUI 版本行为不一），
+/* 挂三个按钮。不依赖 addWidget 的返回值（各 ComfyUI 版本行为不一），
    直接按"加之前有几个"切出新增的那几个。 */
 function attachButtons(node) {
   const before = node.widgets?.length ?? 0;
   node.addWidget("button", "前往词典站寻找灵感", "", () => onOpenAtlas(node));
   node.addWidget("button", "随机提示词", "", () => onRandom(node));
-  return (node.widgets || []).slice(before);
+  node.addWidget("button", autoRandomLabel(node), "", () => toggleAutoRandom(node));
+  const added = (node.widgets || []).slice(before);
+  /* 第三个按钮要能被 toggleAutoRandom 改名，存一份引用（索引不固定） */
+  node.__codexAtlasAutoBtn = added[2] || null;
+  return added;
 }
 
 function syntaxButtonLabel(node) {
@@ -1134,16 +1233,16 @@ function setupInline(node) {
   }
 
   const before = node.widgets?.length ?? 0;
-  attachButtons(node);
-  node.addWidget("button", syntaxButtonLabel(node), "", () => toggleSyntaxOnNode(node));
-  node.__codexAtlasSyntaxBtn = (node.widgets || [])[before + 2] || null;
+  const added = attachButtons(node);
+  const syntaxBtn = node.addWidget("button", syntaxButtonLabel(node), "", () => toggleSyntaxOnNode(node));
+  node.__codexAtlasSyntaxBtn = (node.widgets || [])[before + added.length] || syntaxBtn || null;
 
-  /* 比原生 CLIP 文本编码多挂了两个按钮 + 一个语法切换，原高度是按单个
+  /* 比原生 CLIP 文本编码多挂了三个按钮 + 一个语法切换，原高度是按单个
      文本框算的，加完就装不下。同样走绝对下限 —— 写成「再加 84」的话，
      工作流每加载一次，节点就会再高一截。 */
   requestAnimationFrame(() => {
     const minW = 330;
-    const minH = 290;
+    const minH = 320;
     let needH = minH;
     try {
       const s = node.computeSize?.();
@@ -1229,19 +1328,19 @@ function setupNode(node) {
 
   /* 节点尺寸：用「绝对下限」，不用「在当前高度上加多少」。
    *
-   * 这个节点比普通节点多两个按钮，text 和 negative 又都是多行框，
+   * 这个节点比普通节点多三个按钮，text 和 negative 又都是多行框，
    * ComfyUI 给新节点的默认高度装不下 —— 两个按钮会被挤到看不见，
    * 新用户得手动把节点往下拉才找得到「前往词典站寻找灵感」。
    *
    * 为什么不能写成 (当前高度 + 40)：加载已保存的工作流时，node.size
    * 里已经包含这些控件的高度了，再加一次就会越加载越高。
    *
-   * 算式（ComfyUI 默认行高）：标题 30 + text 6 行 132 + 两个按钮 56
-   * + syntax 28 + codex 28 + negative 74 + 留白 ≈ 380，取下限 400。
+   * 算式（ComfyUI 默认行高）：标题 30 + text 6 行 132 + 三个按钮 84
+   * + syntax 28 + codex 28 + negative 74 + 留白 ≈ 408，取下限 430。
    * computeSize() 能算出更大值就听它的 —— 不同前端版本行高不一样。 */
   requestAnimationFrame(() => {
     const minW = 340;
-    const minH = 400;
+    const minH = 430;
     let needH = minH;
     try {
       const s = node.computeSize?.();
@@ -1287,6 +1386,10 @@ app.registerExtension({
       console.warn("[法典图鉴] 注册设置项失败：", err);
     }
 
+    /* 运行入口只有 app.queuePrompt 这一道门，装上钩子后，开了开关的节点
+       每次运行都会重新抽词 */
+    installAutoRandomHook();
+
     /* 预热一次法典列表，节点第一次落地时下拉就已就绪 */
     loadCodexIndex().catch(() => {});
   },
@@ -1328,4 +1431,14 @@ app.registerExtension({
 });
 
 /* 供控制台调试用 */
-window.__codexAtlas = { convertTagsString, buildAtlasUrl, openAtlasWindow, closeAtlasWindow, loadCodexIndex };
+window.__codexAtlas = {
+  convertTagsString,
+  buildAtlasUrl,
+  openAtlasWindow,
+  closeAtlasWindow,
+  loadCodexIndex,
+  drawOnce,
+  autoRandomAllNodes,
+  readAutoRandom,
+  writeAutoRandom,
+};

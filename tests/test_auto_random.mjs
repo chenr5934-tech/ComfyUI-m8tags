@@ -35,6 +35,10 @@ const flush = () => new Promise(r => setTimeout(r, 0));
 
 const extensions = [];
 const queueCalls = [];
+/* 事件顺序："抽词"必须排在"提交"前面。只断言"抽过词"是不够的 ——
+   抽词晚于提交的话，框里会更新成新词，可跑出去的还是上一轮那条，
+   测试照样绿，功能却是坏的。 */
+const timeline = [];
 let fetchCalls = [];
 let randomPayload = null;
 let originalQueue = null;
@@ -44,6 +48,7 @@ const app = {
   ui: { settings: { getSettingValue: () => false, addSetting() {} } },
   registerExtension(ext) { extensions.push(ext); },
   async queuePrompt(...args) {
+    timeline.push("queue");
     queueCalls.push(args);
     return "queued";
   },
@@ -87,6 +92,7 @@ function installGlobals() {
       return json({ ok: true, codexes: [{ id: "demo", title: "演示法典" }], dataMtime: 1 });
     }
     if (path.endsWith("/random")) {
+      timeline.push("random");
       if (!randomPayload) return json({ ok: false, error: "抽词接口挂了" }, 500);
       return json({ ok: true, ...randomPayload });
     }
@@ -188,10 +194,16 @@ w(n1, AUTO_PREFIX + "关（点击开启）").callback(); /* 开 */
 app.graph._nodes = [n1];
 randomPayload = { codex: "demo", codexTitle: "演示法典", title: "词条甲", tags: "抽到的 A1111 文本", tagsNai: "抽到的 NAI 文本", negative: "", negativeNai: "" };
 fetchCalls = [];
+timeline.length = 0;
 queueCalls.length = 0;
 const ret = await app.queuePrompt(0, 1, { intent: "test" });
 
 ok(fetchCalls.filter(p => p.endsWith("/random")).length === 1, "queuePrompt 提交前抽了一次词", fetchCalls.join(","));
+const iRandom = timeline.indexOf("random");
+const iQueue = timeline.indexOf("queue");
+ok(iRandom >= 0 && iQueue >= 0 && iRandom < iQueue,
+  "顺序正确：先抽词、再提交（反过来的话跑出去的还是上一轮那条）",
+  timeline.join(" → "));
 ok(w(n1, "text").value === "抽到的 A1111 文本", "抽到的词已经写进 text 框", JSON.stringify(w(n1, "text").value));
 ok(queueCalls.length === 1, "原 queuePrompt 照常被调用（工作流跑起来了）");
 ok(ret === "queued", "返回值原样透传");

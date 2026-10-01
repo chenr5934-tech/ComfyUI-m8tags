@@ -192,7 +192,7 @@ ok(trueBtn && trueBtn.value === "", "开关状态没有塞进按钮 widget 的 v
 /* 用例 6：开着的节点在提交前被抽词 */
 w(n1, AUTO_PREFIX + "关（点击开启）").callback(); /* 开 */
 app.graph._nodes = [n1];
-randomPayload = { codex: "demo", codexTitle: "演示法典", title: "词条甲", tags: "抽到的 A1111 文本", tagsNai: "抽到的 NAI 文本", negative: "", negativeNai: "" };
+randomPayload = { codex: "demo", codexTitle: "演示法典", title: "词条甲", nai: "抽到的 NAI 原文", negative: "" };
 fetchCalls = [];
 timeline.length = 0;
 queueCalls.length = 0;
@@ -204,7 +204,7 @@ const iQueue = timeline.indexOf("queue");
 ok(iRandom >= 0 && iQueue >= 0 && iRandom < iQueue,
   "顺序正确：先抽词、再提交（反过来的话跑出去的还是上一轮那条）",
   timeline.join(" → "));
-ok(w(n1, "text").value === "抽到的 A1111 文本", "抽到的词已经写进 text 框", JSON.stringify(w(n1, "text").value));
+ok(w(n1, "text").value === "抽到的 NAI 原文", "抽到的词已经写进 text 框", JSON.stringify(w(n1, "text").value));
 ok(queueCalls.length === 1, "原 queuePrompt 照常被调用（工作流跑起来了）");
 ok(ret === "queued", "返回值原样透传");
 ok(JSON.stringify(queueCalls[0]) === JSON.stringify([0, 1, { intent: "test" }]), "调用参数原样透传", JSON.stringify(queueCalls[0]));
@@ -228,8 +228,8 @@ fetchCalls = [];
 queueCalls.length = 0;
 await app.queuePrompt(0, 1, {});
 ok(fetchCalls.filter(p => p.endsWith("/random")).length === 1, "两个节点一开一关：只抽了开着的那个", fetchCalls.join(","));
-ok(w(n2, "text").value === "抽到的 A1111 文本", "开着的那台抽到了新词");
-ok(w(n1, "text").value === "抽到的 A1111 文本", "关着的那台没被重抽（值还是上次抽的）");
+ok(w(n2, "text").value === "抽到的 NAI 原文", "开着的那台抽到了新词");
+ok(w(n1, "text").value === "抽到的 NAI 原文", "关着的那台没被重抽（值还是上次抽的）");
 
 /* 用例 9：抽词失败不阻断运行 */
 randomPayload = null; /* 让 /random 返 500 */
@@ -240,7 +240,7 @@ ok(queueCalls.length === 1, "抽词接口报错时，工作流照样提交（不
 ok(fetchCalls.filter(p => p.endsWith("/random")).length === 1, "失败的那次确实尝试过");
 
 /* 用例 10：手点「随机提示词」不受开关影响 */
-randomPayload = { codex: "demo", codexTitle: "演示法典", title: "词条乙", tags: "手点抽到的词", tagsNai: "", negative: "", negativeNai: "" };
+randomPayload = { codex: "demo", codexTitle: "演示法典", title: "词条乙", nai: "手点抽到的词", negative: "" };
 n2.properties.codexAtlasAutoRandom = false;
 app.graph._nodes = [n2];
 await w(n2, "随机提示词").callback();
@@ -248,7 +248,7 @@ await flush();
 ok(w(n2, "text").value === "手点抽到的词", "开关关着时，手动点「随机提示词」照抽不误");
 
 /* 用例 11：NAI 语法下抽到的是 NAI 那一版 */
-randomPayload = { codex: "demo", codexTitle: "演示法典", title: "词条丙", tags: "A1111 版", tagsNai: "NAI 版", negative: "", negativeNai: "" };
+randomPayload = { codex: "demo", codexTitle: "演示法典", title: "词条丙", nai: "NAI 版", negative: "" };
 w(n2, "syntax").value = "原始 NAI 语法";
 n2.properties.codexAtlasAutoRandom = true;
 app.graph._nodes = [n2];
@@ -271,12 +271,63 @@ const inlBtn = w(inl, AUTO_PREFIX + "关（点击开启）");
 ok(!!inlBtn, "打开设置后，内置 CLIP 文本编码节点上也有自动随机开关");
 
 inlBtn.callback();
-randomPayload = { codex: "demo", codexTitle: "演示法典", title: "词条丁", tags: "inline 抽到的词", tagsNai: "", negative: "", negativeNai: "" };
+randomPayload = { codex: "demo", codexTitle: "演示法典", title: "词条丁", nai: "inline 抽到的词", negative: "" };
 app.graph._nodes = [inl];
 await app.queuePrompt(0, 1, {});
 ok(w(inl, "text").value === "inline 抽到的词", "inline 节点的自动随机同样生效", JSON.stringify(w(inl, "text").value));
 ok(inl.properties.codexAtlasAutoRandom === true,
   "inline 节点没有 syntax widget，开关状态照样落在 properties 上（能跟着工作流走）");
+
+/* ------------------------------------------------------------ 剪贴板取词 */
+
+const A = globalThis.window.__codexAtlas;
+
+ok(A.normalizeClipText("a, b") === "a, b", "取词：单行原样保留");
+ok(A.normalizeClipText("line1\nline2\n\n  line3  ") === "line1, line2, line3",
+  "取词：换行折成逗号，空行和两头空白收掉", JSON.stringify(A.normalizeClipText("line1\nline2\n\n  line3  ")));
+ok(A.normalizeClipText("") === "" && A.normalizeClipText(null) === "",
+  "取词：空内容 / null 不炸");
+
+/* ---------------------------------------------------------------- 收藏 */
+
+localStorage.removeItem("qtc-m8-favs");
+const f0 = A.loadFavs();
+ok(f0.groups.length === 1 && f0.items.length === 0,
+  "收藏：初始是空的一份，带一个默认分类");
+
+A.addFav({ kind: "text", title: "猫娘", text: "cat girl, blue eyes" });
+const f1 = A.loadFavs();
+ok(f1.items.length === 1, "收藏：存得进");
+ok(f1.items[0].text === "cat girl, blue eyes", "收藏：内容原样保存");
+ok(f1.items[0].group === f1.groups[0], "收藏：默认落在第一个分类里");
+
+A.addFav({ kind: "text", title: "同样的再来一次", text: "cat girl, blue eyes" });
+ok(A.loadFavs().items.length === 1, "收藏：同样内容不会被存两遍");
+
+A.addFav({ kind: "page", title: "某页", url: "https://novelai.quicktagcloud.com/?c=x&p=y" });
+const f2 = A.loadFavs();
+ok(f2.items.length === 2, "收藏：网页位置也能存");
+ok(f2.items[0].kind === "page", "收藏：新存的排在最前");
+
+f2.groups.push("构图");
+f2.items[0].group = "构图";
+A.saveFavs(f2);
+const f3 = A.loadFavs();
+ok(f3.groups.includes("构图"), "收藏：分类存得住");
+ok(f3.items[0].group === "构图", "收藏：条目归到哪个分类也存得住");
+
+const big = { groups: ["默认"], items: [] };
+for (let i = 0; i < 320; i++) {
+  big.items.push({ id: `x${i}`, kind: "text", title: `t${i}`, text: `v${i}`, url: "", group: "默认", ts: i });
+}
+A.saveFavs(big);
+ok(A.loadFavs().items.length === 300,
+  "收藏：超过 300 条会截断，不至于把 localStorage 撑爆", String(A.loadFavs().items.length));
+
+/* 坏数据不能让收藏整个哑掉 */
+localStorage.setItem("qtc-m8-favs", "{ 这不是 JSON");
+const f4 = A.loadFavs();
+ok(f4.items.length === 0 && f4.groups.length === 1, "收藏：存档坏了就当空的重来，不抛异常");
 
 console.log(`\n===== ${pass}/${pass + fail} 通过 =====`);
 process.exit(fail ? 1 : 0);

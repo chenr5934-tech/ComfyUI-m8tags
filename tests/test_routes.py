@@ -34,18 +34,6 @@ from py import store  # noqa: E402
 from py.nodes import CODEX_ANY, SYNTAX_OPTIONS  # noqa: E402
 
 
-def _codex_ids() -> set:
-    """当前数据里有哪几部法典。
-
-    站点数据是可替换的，用到特定法典的用例在缺数据时跳过而不是失败
-    —— 别人的数据集里未必有 suozhang。
-    """
-    try:
-        return {m.get("id") for m in store.get_meta_list()}
-    except Exception:
-        return set()
-
-
 def call(handler, path, method="GET", match_info=None):
     # aiohttp 的 make_mocked_request 拿到 match_info=None 会构造失败（它要的是映射），
     # 只有完全不传时才用内部默认值。
@@ -65,163 +53,152 @@ def body_of(response):
     return json.loads(response.text)
 
 
-class TestCodexesEndpoint(unittest.TestCase):
-    def test_ok_shape(self):
-        response = call(routes_mod._handle_codexes, "/codex_atlas/codexes")
-        self.assertEqual(response.status, 200)
-        data = body_of(response)
-        self.assertTrue(data["ok"])
-        self.assertGreater(len(data["codexes"]), 0)
-        self.assertEqual(data["anyLabel"], CODEX_ANY)
-        self.assertEqual(data["syntaxOptions"], SYNTAX_OPTIONS)
-        self.assertTrue(data["dataMtime"], "没有返回本地数据时间")
+SOURCE_URL = "https://novelai.quicktagcloud.com/data-source.json"
+CDN_BASE = "https://assets.quicktagcloud.com/data"
 
-    def test_chinese_is_not_escaped(self):
-        response = call(routes_mod._handle_codexes, "/codex_atlas/codexes")
-        self.assertIn("法典", response.text)
-        self.assertNotIn("\\u6cd5", response.text)
 
-    def test_codex_entries_have_required_fields(self):
+class TestOnlineData(unittest.TestCase):
+    """在线取数。一个真请求都不发 —— _http_json 整个换成假的。
+
+    这条链是四跳的：data-source.json → current.json → codexes.json → 各法典。
+    少接一跳、或者发布号换了没作废旧缓存，都会表现成「随机抽词时好时坏」，
+    所以每一段都单独验。
+    """
+
+    RELEASE = "r-test123"
+
+    def setUp(self):
+        self.calls = []
+        base = "{}/releases/{}".format(CDN_BASE, self.RELEASE)
+        self.payloads = {
+            SOURCE_URL: {"baseUrl": CDN_BASE, "pointer": "current.json"},
+            CDN_BASE + "/current.json": {"release": self.RELEASE},
+            base + "/codexes.json": [
+                {"id": "suozhang", "title": "所长", "entryCount": 2},
+                {"id": "artist_nai5_personal", "title": "画师词典", "entryCount": 1},
+                {"id": "mengshen_r18", "title": "梦神R18", "entryCount": 1},
+            ],
+            base + "/suozhang.json": {"entries": [
+                {"id": "a", "title": "甲", "tags": "1.2::cat::, dog", "negative": "lowres"},
+                {"id": "b", "title": "乙", "tags": "bird", "negative": ""},
+            ]},
+            base + "/artist_nai5_personal.json": {"entries": [
+                {"id": "p1", "title": "画师甲", "tags": "artist:someone", "negative": ""},
+            ]},
+            base + "/mengshen_r18.json": {"entries": [
+                {"id": "r1", "title": "R18 词条", "tags": "nsfw thing", "negative": ""},
+            ]},
+        }
+        self.orig = routes_mod._http_json
+        routes_mod._http_json = self._fake
+        self.reset_online()
+
+    def tearDown(self):
+        routes_mod._http_json = self.orig
+        self.reset_online()
+
+    def reset_online(self):
+        with routes_mod._online_lock:
+            routes_mod._online.update(
+                {"at": 0.0, "release": "", "base": "", "codexes": None, "entries": {}})
+
+    def _fake(self, url, timeout=30):
+        self.calls.append(url)
+        if url not in self.payloads:
+            raise RuntimeError("假的取数层没有这个地址：{}".format(url))
+        return self.payloads[url]
+
+    # ------------------------------------------------------------ 取数链
+
+    def test_codexes_lists_what_the_manifest_says(self):
         data = body_of(call(routes_mod._handle_codexes, "/codex_atlas/codexes"))
-        for codex in data["codexes"]:
-            self.assertTrue(codex["id"])
-            self.assertTrue(codex["title"])
-            self.assertIsInstance(codex["nsfw"], bool)
-            self.assertIsInstance(codex["entryCount"], int)
-
-
-class TestRandomEndpoint(unittest.TestCase):
-    def test_random_any(self):
-        response = call(routes_mod._handle_random, "/codex_atlas/random")
-        self.assertEqual(response.status, 200)
-        data = body_of(response)
         self.assertTrue(data["ok"])
-        self.assertTrue(data["tags"].strip())
-        self.assertFalse(data["nsfw"], "默认池里混进了 R18 法典")
+        self.assertEqual([c["id"] for c in data["codexes"]],
+                         ["suozhang", "artist_nai5_personal", "mengshen_r18"])
+        self.assertTrue(data["online"], "没标出这是在线数据")
+        self.assertEqual(data["release"], self.RELEASE)
 
-    def test_negative_short_field_is_mapped(self):
-        """本地负向字段叫 n，映射漏了就会一直返回空串。
+    def test_r18_is_recognised_by_id_suffix(self):
+        """线上清单里没有 nsfw 字段，R18 靠 id 后缀认 —— 认错了就会把 R18
+        混进「不含 R18」的默认池子里。"""
+        data = body_of(call(routes_mod._handle_codexes, "/codex_atlas/codexes"))
+        by_id = {c["id"]: c for c in data["codexes"]}
+        self.assertTrue(by_id["mengshen_r18"]["nsfw"])
+        self.assertFalse(by_id["suozhang"]["nsfw"])
 
-        特意用 community_ai_misc（5156 条里 5147 条带负向）来测。
-        换 suozhang_r18 只有 402/11597 带负向，抽样撞运气的写法会变成偶发失败。
-        """
-        if "community_ai_misc" not in _codex_ids():
-            self.skipTest("测试数据里没有 community_ai_misc")
-        for _ in range(3):
-            data = body_of(call(routes_mod._handle_random, "/codex_atlas/random?codex=community_ai_misc"))
-            if str(data.get("negative") or "").strip():
-                return
-        self.fail("连抽 3 次都没拿到负向标签，n 字段很可能没映射")
+    def test_manifest_is_cached_between_calls(self):
+        call(routes_mod._handle_codexes, "/codex_atlas/codexes")
+        n = len(self.calls)
+        call(routes_mod._handle_codexes, "/codex_atlas/codexes")
+        self.assertEqual(len(self.calls), n, "第二次还在联网，缓存没起作用")
 
-    def test_both_syntax_versions_returned(self):
-        """两个语法版本都得给前端，缺了「原始 NAI」模式就没内容。"""
-        if "suozhang" not in _codex_ids():
-            self.skipTest("测试数据里没有 suozhang")
-        if store.raw_dir() is None:
-            self.skipTest("没有原始 NAI 数据源，跳过配对校验")
-        data = body_of(call(routes_mod._handle_random, "/codex_atlas/random?codex=suozhang"))
-        self.assertTrue(data["tags"].strip())
-        self.assertIn("tagsNai", data)
+    def test_refresh_bypasses_the_cache(self):
+        call(routes_mod._handle_codexes, "/codex_atlas/codexes")
+        n = len(self.calls)
+        call(routes_mod._handle_codexes, "/codex_atlas/codexes?refresh=1")
+        self.assertGreater(len(self.calls), n, "refresh=1 没能强制重取")
+
+    def test_new_release_throws_away_cached_entries(self):
+        """站点发新版之后旧词条必须作废 —— 不然会拿上一版的词条当最新，
+        而且自己还不知道。"""
+        routes_mod._online_entries("suozhang")
+        self.assertTrue(routes_mod._online["entries"].get("suozhang"))
+
+        self.payloads[CDN_BASE + "/current.json"] = {"release": "r-next"}
+        with routes_mod._online_lock:
+            routes_mod._online["at"] = 0.0        # 让发布指针过期，逼它重取
+        self.payloads["{}/releases/r-next/codexes.json".format(CDN_BASE)] = []
+
+        routes_mod._online_base()
+        self.assertEqual(routes_mod._online["release"], "r-next")
+        self.assertEqual(routes_mod._online["entries"], {}, "换版后旧词条缓存还在")
+
+    def test_unreachable_source_reports_502(self):
+        def boom(url, timeout=30):
+            raise OSError("连不上")
+        routes_mod._http_json = boom
+        r = call(routes_mod._handle_codexes, "/codex_atlas/codexes")
+        self.assertEqual(r.status, 502)
+        self.assertIn("失败", body_of(r)["error"])
+
+    # ------------------------------------------------------------ 随机抽词
+
+    def test_random_returns_nai_and_negative(self):
+        data = body_of(call(routes_mod._handle_random, "/codex_atlas/random"))
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["codex"], "suozhang", "默认池子里只该有非 R18 的非画师法典")
+        self.assertTrue(data["nai"], "没有 nai 字段")
         self.assertIn("negative", data)
-        self.assertIn("negativeNai", data)
+        self.assertTrue(data["title"])
 
-        # suozhang 的 raw 与 data 配对率在 90% 以上，抽几次必然命中；连抽 8 次空才是真有问题
-        for _ in range(8):
-            d = body_of(call(routes_mod._handle_random, "/codex_atlas/random?codex=suozhang"))
-            if d.get("tagsNai"):
-                self.assertNotEqual(d["tags"], d["tagsNai"], "两版内容相同，配对取错了")
-                return
-        self.fail("连抽 8 次都拿不到原始 NAI 版本")
-
-    def test_image_url(self):
-        # composition_style 的 64 条全都带图，可以稳定断言
-        if "composition_style" not in _codex_ids():
-            self.skipTest("测试数据里没有 composition_style")
-        data = body_of(call(routes_mod._handle_random, "/codex_atlas/random?codex=composition_style"))
-        self.assertTrue(data["image"], "composition_style 应该每条都带图")
-        self.assertTrue(data["imageUrl"].startswith("/codex_atlas/atlas/images/"))
-
-    def test_unknown_codex_returns_404_json(self):
-        response = call(routes_mod._handle_random, "/codex_atlas/random?codex=__nope__")
-        self.assertEqual(response.status, 404)
-        data = body_of(response)
-        self.assertFalse(data["ok"])
-        self.assertIn("__nope__", data["error"])
-
-    def test_explicit_nsfw_codex_allowed(self):
-        if "mengshen_r18" not in _codex_ids():
-            self.skipTest("测试数据里没有 mengshen_r18")
-        response = call(routes_mod._handle_random, "/codex_atlas/random?codex=mengshen_r18")
-        self.assertEqual(response.status, 200)
-        data = body_of(response)
-        self.assertTrue(data["ok"])
-        self.assertEqual(data["codex"], "mengshen_r18")
-        self.assertTrue(data["nsfw"])
-
-
-    def test_any_pool_skips_artist_codices(self):
-        """「全部法典」模式下不抽画师词典。
-
-        画师词典通篇是画师 tag，一条就能把整张图的画风带偏，混进随机结果里
-        跟抽到普通词条完全不是一回事。连抽 40 次（若没排除，按 11 部里漏 2 部算
-        期望会撞上约 6 次），一次都不该落到 artist_* 上。
-        """
-        artists = {i for i in _codex_ids() if str(i).startswith(routes_mod.ARTIST_CODEX_PREFIX)}
-        if not artists:
-            self.skipTest("测试数据里没有画师词典")
-        seen = set()
-        for _ in range(40):
+    def test_random_skips_artist_codices_by_default(self):
+        for _ in range(30):
             data = body_of(call(routes_mod._handle_random, "/codex_atlas/random"))
-            self.assertTrue(data["ok"])
-            seen.add(data["codex"])
-            self.assertFalse(
-                str(data["codex"]).startswith(routes_mod.ARTIST_CODEX_PREFIX),
-                "全集随机抽到了画师词典：{}".format(data["codex"]),
-            )
-        self.assertTrue(seen, "一次都没抽到内容")
+            self.assertFalse(str(data["codex"]).startswith("artist_"),
+                             "全集随机抽到了画师词典：{}".format(data["codex"]))
 
-    def test_artist_codex_still_drawable_when_explicit(self):
-        """明确选中画师词典时要照抽 —— 这条规则不能把人堵死。"""
-        artists = sorted(i for i in _codex_ids() if str(i).startswith(routes_mod.ARTIST_CODEX_PREFIX))
-        if not artists:
-            self.skipTest("测试数据里没有画师词典")
-        cid = artists[0]
-        data = body_of(call(routes_mod._handle_random, "/codex_atlas/random?codex=" + cid))
+    def test_random_skips_r18_by_default(self):
+        for _ in range(20):
+            data = body_of(call(routes_mod._handle_random, "/codex_atlas/random"))
+            self.assertNotEqual(data["codex"], "mengshen_r18", "默认把 R18 抽出来了")
+
+    def test_random_can_be_pointed_at_an_artist_codex(self):
+        data = body_of(call(routes_mod._handle_random,
+                            "/codex_atlas/random?codex=artist_nai5_personal"))
         self.assertTrue(data["ok"])
-        self.assertEqual(data["codex"], cid)
-        self.assertTrue(str(data["tags"]).strip())
+        self.assertEqual(data["codex"], "artist_nai5_personal")
+        self.assertEqual(data["nai"], "artist:someone")
 
+    def test_random_rejects_unknown_codex(self):
+        r = call(routes_mod._handle_random, "/codex_atlas/random?codex=not_there")
+        self.assertEqual(r.status, 404)
 
-class TestEntryEndpoint(unittest.TestCase):
-    """小窗里点「加入已选栏」靠这个接口补齐两个语法版本。"""
-
-    def test_entry_by_id(self):
-        if "suozhang" not in _codex_ids():
-            self.skipTest("测试数据里没有 suozhang")
-        data = body_of(call(
-            routes_mod._handle_entry,
-            "/codex_atlas/entry?codex=suozhang&id=suozhang-0001",
-        ))
-        self.assertTrue(data["ok"])
-        self.assertEqual(data["id"], "suozhang-0001")
-        self.assertEqual(data["codex"], "suozhang")
-        self.assertTrue(data["tags"].strip(), "没有 A1111 版本")
-        self.assertTrue(data["tagsNai"].strip(), "这条应该有原始 NAI 版本")
-        self.assertNotEqual(data["tags"], data["tagsNai"], "两个版本不该相同")
-
-    def test_missing_params_400(self):
-        for path in ("/codex_atlas/entry", "/codex_atlas/entry?codex=suozhang", "/codex_atlas/entry?id=x"):
-            response = call(routes_mod._handle_entry, path)
-            self.assertEqual(response.status, 400, path)
-
-    def test_unknown_entry_404(self):
-        response = call(routes_mod._handle_entry, "/codex_atlas/entry?codex=suozhang&id=__nope__")
-        self.assertEqual(response.status, 404)
-        self.assertFalse(body_of(response)["ok"])
-
-    def test_unknown_codex_404(self):
-        response = call(routes_mod._handle_entry, "/codex_atlas/entry?codex=__nope__&id=x")
-        self.assertEqual(response.status, 404)
+    def test_random_survives_a_broken_source(self):
+        def boom(url, timeout=30):
+            raise OSError("连不上")
+        routes_mod._http_json = boom
+        r = call(routes_mod._handle_random, "/codex_atlas/random")
+        self.assertEqual(r.status, 502)
 
 
 class FakeJsonRequest:
@@ -551,30 +528,52 @@ class TestCleanHeader(unittest.TestCase):
 
 
 class TestStatusEndpoint(unittest.TestCase):
-    def test_status(self):
+    def test_status_says_online_and_has_self_image(self):
         data = body_of(call(routes_mod._handle_status, "/codex_atlas/status"))
-        self.assertTrue(data["ok"], f"状态异常：{data.get('error')}")
-        self.assertGreater(data["codexCount"], 0)
-
-
-def _first_image_tail():
-    """从站点 images/ 里挑一张真实存在的图，用来验证图片的长缓存头。"""
-    images = store.IMAGES_DIR
-    if images.is_dir():
-        for codex in sorted(images.iterdir()):
-            if not codex.is_dir():
-                continue
-            for f in sorted(codex.iterdir()):
-                if f.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
-                    return f"images/{codex.name}/{f.name}"
-    raise unittest.SkipTest("站点 images/ 里没有图")
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["online"], "状态里没标出数据来自线上")
+        self.assertEqual(data["mode"], "comfyui-plugin")
+        self.assertIn("self-image", data["features"])
+        self.assertNotIn("codexCount", data,
+                         "本地法典数据已经删了，状态里不该再有这一项")
 
 
 class TestAtlasStatic(unittest.TestCase):
-    def test_index_served(self):
-        response = call_static("index.html")
-        self.assertEqual(response.status, 200)
-        self.assertIn("法典图鉴", response.text)
+    """静态伺服现在只伺候「我的图库」那一页 —— 法典站点本身不再伺服了。"""
+
+    def test_gallery_page_is_served(self):
+        r = call_static("gallery.html")
+        self.assertEqual(r.status, 200)
+        self.assertIn("我的图库", r.text)
+
+    def test_empty_tail_falls_back_to_gallery(self):
+        r = call_static("")
+        self.assertEqual(r.status, 200)
+        self.assertIn("我的图库", r.text)
+
+    def test_gallery_scripts_carry_a_cache_busting_stamp(self):
+        """页面里本站自己的代码要带 ?v= 版本戳。
+
+        浏览器缓存是「文件改对了、界面还是旧的」这类怪现象的头号来源，
+        表现常常是「某个脚本没跑起来」。把这条契约钉住。
+        """
+        r = call_static("gallery.html")
+        for asset in ("app.css", "gallery.js", "gallery-meta.js"):
+            self.assertIn('"{}?v='.format(asset), r.text, asset + " 没有版本戳")
+
+    def test_data_file_is_not_stamped(self):
+        """self-image/index.js 是**数据**，不能带版本戳。
+
+        用户每存一张图它就重写一次；它一变版本戳就跟着变，
+        会把所有脚本的 URL 一起换掉、逼浏览器重下几十 KB。
+        """
+        r = call_static("gallery.html")
+        self.assertIn('"self-image/index.js"', r.text)
+        self.assertNotIn('"self-image/index.js?v=', r.text)
+
+    def test_gallery_is_not_cached(self):
+        r = call_static("gallery.html")
+        self.assertEqual(r.headers.get("Cache-Control"), "no-store")
 
     def test_missing_self_image_index_serves_empty(self):
         """图库索引是存图时才生成的，新装或清空后它并不存在 —— 但页面会去加载它。
@@ -606,55 +605,30 @@ class TestAtlasStatic(unittest.TestCase):
         try:
             r = call_static("self-image/index.js")
             self.assertEqual(r.status, 200)
-            # 文件在时走的是正常的 FileResponse（流式发文件），不是那个空索引兜底。
             self.assertIsInstance(r, web.FileResponse, "真实索引被兜底空索引顶掉了")
             self.assertEqual(Path(r._path), d / "self-image" / "index.js")
         finally:
             store.ATLAS_DIR = old
             shutil.rmtree(d, ignore_errors=True)
 
-    def test_index_scripts_carry_a_cache_busting_stamp(self):
-        """首页里本站**代码**要带 ?v= 版本戳。
-
-        浏览器缓存是"代码改对了、界面还是旧的"这类怪现象的头号来源，
-        表现常常是"某个脚本没跑起来"。这里把这条契约钉住。
-        """
-        response = call_static("index.html")
-        for asset in ("app.js", "gallery.js", "gallery-meta.js", "data/index.js"):
-            self.assertIn(f'"{asset}?v=', response.text, asset + " 没有版本戳")
-
-    def test_index_data_file_is_not_stamped(self):
-        """self-image/index.js 是**数据**，不能带版本戳。
-
-        用户每存一张图它就重写一次；它一变，版本戳就跟着变，
-        会把所有脚本的 URL 一起换掉、逼浏览器重新下载几十 KB。
-        它本来就该每次重读（响应头是 no-cache）。
-        """
-        response = call_static("index.html")
-        self.assertIn('"self-image/index.js"', response.text)
-        self.assertNotIn('"self-image/index.js?v=', response.text)
-
-    def test_index_is_not_cached(self):
-        response = call_static("index.html")
-        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
-
-    def test_empty_tail_falls_back_to_index(self):
-        response = call_static("")
-        self.assertEqual(response.status, 200)
-
-    def test_data_file_served(self):
-        response = call_static("data/index.js")
-        self.assertEqual(response.status, 200)
-        self.assertIn("QTC_META", Path(response._path).read_text("utf-8"))
-
     def test_scripts_are_no_cache_but_images_are_long_cached(self):
-        self.assertEqual(call_static("app.js").headers.get("Cache-Control"), "no-cache")
-        image = call_static(_first_image_tail())
-        self.assertIn("max-age=86400", image.headers.get("Cache-Control", ""))
+        self.assertEqual(call_static("gallery.js").headers.get("Cache-Control"), "no-cache")
+
+        d = Path(tempfile.mkdtemp(prefix="codex-atlas-img-"))
+        (d / "self-image").mkdir(parents=True)
+        (d / "self-image" / "x.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+        old = store.ATLAS_DIR
+        store.ATLAS_DIR = d
+        try:
+            r = call_static("self-image/x.png")
+            self.assertIn("max-age=86400", r.headers.get("Cache-Control", ""))
+        finally:
+            store.ATLAS_DIR = old
+            shutil.rmtree(d, ignore_errors=True)
 
     def test_traversal_blocked(self):
         for bad in ("../py/store.py", "../../ComfyUI-CodexAtlas/py/nodes.py", "..%2F..%2Fmain.py"):
-            with self.assertRaises(web.HTTPNotFound, msg=f"没挡住：{bad}"):
+            with self.assertRaises(web.HTTPNotFound, msg="没挡住：{}".format(bad)):
                 call_static(bad)
 
 
@@ -692,485 +666,6 @@ class TestResolveUnder(unittest.TestCase):
     def test_empty_tail_is_refused(self):
         self.assertIsNone(routes_mod._resolve_under(self.root, ""))
         self.assertIsNone(routes_mod._resolve_under(self.root, None))
-
-
-class TestShortFieldMapping(SelfImageTestBase):
-    """本地数据里负向提示词被压成短字段 `n`，取词条时要映射回 negative。
-
-    原来这条靠真实数据集里的某本特定法典，那本不存在就整条 skipTest ——
-    最容易因数据格式变化而静默失效的映射反而没人守。这里用自造的 entry 直接测。
-    """
-
-    def test_short_negative_field_maps_to_negative(self):
-        payload = routes_mod._entry_payload(
-            "no_such_codex",
-            {"id": "t1", "title": "标题", "tags": "a, b", "n": "低质量, 崩坏"},
-            {"title": "假法典"},
-        )
-        self.assertEqual(payload["negative"], "低质量, 崩坏")
-        self.assertEqual(payload["tags"], "a, b")
-
-    def test_long_negative_field_name_is_not_part_of_the_contract(self):
-        """data/*.js 里负向压成短名 `n`，这是本地数据的格式契约。
-
-        完整的 `negative` 字段名**不**被读取 —— 把它钉在这里，将来谁想改
-        解析行为（不管是有意还是顺手）都会立刻撞上这条测试。
-        """
-        payload = routes_mod._entry_payload(
-            "no_such_codex",
-            {"id": "t2", "title": "x", "tags": "a", "negative": "完整字段名"},
-            None,
-        )
-        self.assertEqual(payload["negative"], "")
-
-    def test_missing_negative_is_empty_string(self):
-        payload = routes_mod._entry_payload(
-            "no_such_codex", {"id": "t3", "title": "x", "tags": "a"}, None)
-        self.assertEqual(payload["negative"], "")
-
-    def test_sniff_mime_uses_content_not_extension(self):
-        """图片类型按内容判，不按扩展名。
-
-        下载脚本把 PNG 源图统一转成了 JPEG 以压体积，但文件名仍留着 .png；
-        只按扩展名给 Content-Type 就会发出 image/png 配 JPEG 数据。
-        """
-        from py.routes import _sniff_image_mime
-
-        cases = {
-            "名为 .png 实为 JPEG": (b"\xff\xd8\xff\xe0" + b"\x00" * 8, "image/jpeg"),
-            "名为 .jpg 实为 PNG": (b"\x89PNG\r\n\x1a\n" + b"\x00" * 4, "image/png"),
-            "WebP": (b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 4, "image/webp"),
-            "GIF": (b"GIF89a" + b"\x00" * 6, "image/gif"),
-            "不是图片": (b"definitely not an image", None),
-            "太短": (b"\xff\xd8", None),
-            "空": (b"", None),
-        }
-        for label, (head, expect) in cases.items():
-            self.assertEqual(_sniff_image_mime(head), expect, label)
-
-    def test_missing_file_404(self):
-        with self.assertRaises(web.HTTPNotFound):
-            call_static("nope/does-not-exist.jpg")
-
-
-class TestImagesFetch(unittest.TestCase):
-    """例图拉取：状态接口、confirm 门槛，以及几条容易踩的实现细节。
-
-    不联网、不真下载 —— 真的去拉 1.3 GB 不该进单元测试。
-    """
-
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="codex-atlas-fetch-"))
-        self._atlas = store.ATLAS_DIR
-        self._plugin = store.PLUGIN_DIR
-        store.ATLAS_DIR = self.tmp
-        # 下载缓存落在 <插件目录>/bin/_fetch_tmp —— 这里必须一起改掉，
-        # 否则「清理」类用例会去删真实插件目录里的东西。
-        store.PLUGIN_DIR = self.tmp
-        with routes_mod._fetch_lock:
-            routes_mod._fetch_state.update({
-                "stage": "idle", "message": "", "done": 0, "total": 0,
-                "error": None, "startedAt": 0.0, "usedTool": "",
-            })
-
-    def tearDown(self):
-        store.ATLAS_DIR = self._atlas
-        store.PLUGIN_DIR = self._plugin
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def test_status_reports_count_and_shape(self):
-        d = self.tmp / "images" / "composition_style"
-        d.mkdir(parents=True)
-        (d / "a.jpg").write_bytes(b"x")
-        (d / "b.jpg").write_bytes(b"x")
-        (self.tmp / "images" / "README.txt").write_text("说明", "utf-8")
-
-        r = call(routes_mod._handle_images_status, "/codex_atlas/images/status")
-        self.assertEqual(r.status, 200)
-        data = body_of(r)
-        self.assertTrue(data["ok"])
-        self.assertEqual(data["count"], 2, "README.txt 不该被算成配图")
-        self.assertIn("fetch", data)
-        self.assertFalse(data["running"])
-
-    def test_count_is_zero_when_dir_missing(self):
-        """atlas/images/ 还不存在时不能炸 —— 首次运行就是这个状态。"""
-        self.assertEqual(routes_mod._images_count(), 0)
-
-    def test_fetch_requires_confirm(self):
-        """没有 confirm 就 400。1.3 GB 的下载不该被一次手滑的请求触发。"""
-        r = call(routes_mod._handle_images_fetch, "/codex_atlas/images/fetch", method="POST")
-        self.assertEqual(r.status, 400)
-        self.assertIn("confirm", body_of(r)["error"])
-
-    def test_find_7z_returns_something_runnable_or_none(self):
-        """探测 7z：本机装了就用本机的，插件目录里有 7zr.exe 就用它。
-
-        两个都没有时返回 (None, "")，让调用方去下载 —— 不能抛异常。
-        """
-        tool, how = routes_mod._find_7z()
-        if tool is None:
-            self.assertEqual(how, "")
-        else:
-            self.assertTrue(Path(tool).is_file(), "返回的工具路径必须真实存在：{}".format(tool))
-            self.assertTrue(how)
-
-    def test_release_parts_parses_checksum_file(self):
-        """SHA256SUMS.txt 是两列（hash + 文件名），中间可能有空行。"""
-        text = "aaa   m8tags-images.7z.001\n\nbbb  m8tags-images.7z.002\n"
-
-        class _Resp:
-            def __enter__(self):
-                return self
-            def __exit__(self, *a):
-                return False
-            def read(self):
-                return text.encode("utf-8")
-
-        orig = routes_mod._http_get
-        routes_mod._http_get = lambda *a, **k: _Resp()
-        try:
-            parts = routes_mod._release_parts()
-        finally:
-            routes_mod._http_get = orig
-        self.assertEqual(
-            parts,
-            [("aaa", "m8tags-images.7z.001"), ("bbb", "m8tags-images.7z.002")],
-        )
-
-    def test_release_parts_falls_back_when_offline(self):
-        """取不到清单要退回按约定拼名字，而不是让整件事直接失败。"""
-        def boom(*a, **k):
-            raise OSError("no network")
-
-        orig = routes_mod._http_get
-        routes_mod._http_get = boom
-        try:
-            parts = routes_mod._release_parts()
-        finally:
-            routes_mod._http_get = orig
-        self.assertTrue(parts, "兜底清单不该是空的")
-        self.assertEqual(parts[0][1], "m8tags-images.7z.001")
-
-    def test_set_stage_can_update_progress_only(self):
-        """只推进进度、不动阶段 —— 每下完一个分卷都会这么调一次。
-
-        早先 stage 是必填位置参数，`_set_stage(done=idx)` 直接 TypeError，
-        表现成「第一个卷下完就报拉取失败」。单看下卷、校验、解压每一步都是好的，
-        所以这条得单独盯住。
-        """
-        routes_mod._set_stage("downloading", "下载中", done=0, total=4)
-        routes_mod._set_stage(done=1)
-        self.assertEqual(routes_mod._fetch_state["stage"], "downloading", "阶段不该被进度更新抹掉")
-        self.assertEqual(routes_mod._fetch_state["done"], 1)
-        self.assertEqual(routes_mod._fetch_state["message"], "下载中", "提示文字不该被进度更新抹掉")
-
-    def test_fetch_worker_completes_end_to_end(self):
-        """整条拉取流程走一遍真代码：找 7z → 取清单 → 逐个下载 → 校验 → 解压。
-
-        只有下载和解压换成替身（不联网、不真解压），流程本身不替身 ——
-        跨函数的那种错（比如「只更新进度」的调用签名不对）只有整条跑起来才暴露。
-        """
-        parts = [("", "m8tags-images.7z.001"), ("", "m8tags-images.7z.002")]
-        seen_done = []
-        downloads = []
-
-        def fake_download(url, dest):
-            seen_done.append(routes_mod._fetch_state["done"])
-            downloads.append(url)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(b"fake")
-            return dest
-
-        class _Proc:
-            returncode = 0
-
-        tool = self.tmp / "7z.exe"
-        tool.write_bytes(b"fake")
-
-        orig = (routes_mod._find_7z, routes_mod._release_parts, routes_mod._download,
-                routes_mod.subprocess.run, store.PLUGIN_DIR)
-        routes_mod._find_7z = lambda: (tool, "替身")
-        routes_mod._release_parts = lambda: parts
-        routes_mod._download = fake_download
-        routes_mod.subprocess.run = lambda *a, **k: _Proc()
-        store.PLUGIN_DIR = self.tmp
-        try:
-            routes_mod._fetch_worker()
-        finally:
-            (routes_mod._find_7z, routes_mod._release_parts, routes_mod._download,
-             routes_mod.subprocess.run, store.PLUGIN_DIR) = orig
-
-        state = dict(routes_mod._fetch_state)
-        self.assertEqual(state["stage"], "done", "流程没跑完：{}".format(state))
-        self.assertIsNone(state["error"], "流程报错了：{}".format(state))
-        self.assertEqual(state["done"], 2)
-        self.assertEqual(state["total"], 2)
-        self.assertEqual(len(downloads), 2, "两个卷都要下")
-        self.assertEqual(seen_done, [0, 1], "下第二个卷之前，进度应该已经推进到 1")
-        self.assertTrue((self.tmp / "images" / "README.txt").is_file(),
-                        "解压后要补回 images/README.txt")
-        self.assertFalse((self.tmp / "bin" / "_fetch_tmp").exists(),
-                         "图装好之后压缩包该被清掉 —— 不然 1.3 GB 分卷一直躺在插件目录里")
-
-    def test_fetch_worker_skips_already_verified_parts(self):
-        """上一轮下完并校验过的分卷要跳过重下。
-
-        1.3 GB 的东西，因为后面某一步失败就整套重来，代价太大。
-        """
-        name = "m8tags-images.7z.001"
-        tmp = self.tmp / "bin" / "_fetch_tmp"
-        tmp.mkdir(parents=True)
-        (tmp / name).write_bytes(b"downloaded by a previous attempt")
-        sha = routes_mod._sha256_of(tmp / name)
-
-        downloads = []
-
-        def fake_download(url, dest):
-            downloads.append(url)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(b"fake")
-            return dest
-
-        class _Proc:
-            returncode = 0
-
-        tool = self.tmp / "7z.exe"
-        tool.write_bytes(b"fake")
-
-        orig = (routes_mod._find_7z, routes_mod._release_parts, routes_mod._download,
-                routes_mod.subprocess.run, store.PLUGIN_DIR)
-        routes_mod._find_7z = lambda: (tool, "替身")
-        routes_mod._release_parts = lambda: [(sha, name)]
-        routes_mod._download = fake_download
-        routes_mod.subprocess.run = lambda *a, **k: _Proc()
-        store.PLUGIN_DIR = self.tmp
-        try:
-            routes_mod._fetch_worker()
-        finally:
-            (routes_mod._find_7z, routes_mod._release_parts, routes_mod._download,
-             routes_mod.subprocess.run, store.PLUGIN_DIR) = orig
-
-        self.assertEqual(downloads, [], "已经校验过的卷不该再下一次")
-        self.assertEqual(routes_mod._fetch_state["stage"], "done")
-
-    def test_fetch_worker_keeps_parts_when_it_fails(self):
-        """失败时不许把已下好的分卷清掉 —— 清了，重试就等于从零再来。"""
-        name = "m8tags-images.7z.001"
-
-        def fake_download(url, dest):
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(b"downloaded fine")
-            return dest
-
-        class _BadProc:
-            returncode = 1        # 解压这一步失败，下载本身是好的
-
-        tool = self.tmp / "7z.exe"
-        tool.write_bytes(b"fake")
-
-        orig = (routes_mod._find_7z, routes_mod._release_parts, routes_mod._download,
-                routes_mod.subprocess.run, store.PLUGIN_DIR)
-        routes_mod._find_7z = lambda: (tool, "替身")
-        routes_mod._release_parts = lambda: [("", name)]
-        routes_mod._download = fake_download
-        routes_mod.subprocess.run = lambda *a, **k: _BadProc()
-        store.PLUGIN_DIR = self.tmp
-        try:
-            routes_mod._fetch_worker()
-        finally:
-            (routes_mod._find_7z, routes_mod._release_parts, routes_mod._download,
-             routes_mod.subprocess.run, store.PLUGIN_DIR) = orig
-
-        self.assertEqual(routes_mod._fetch_state["stage"], "error")
-        self.assertIn("7z 解压失败", routes_mod._fetch_state["error"])
-        self.assertTrue((self.tmp / "bin" / "_fetch_tmp" / name).is_file(),
-                        "已下好的分卷被清掉了，重试要从零再下 1.3 GB")
-        self.assertIn("_fetch_tmp", routes_mod._fetch_state["message"],
-                      "得告诉用户东西留在哪、重试会跳过")
-
-    def test_fetch_worker_reports_checksum_mismatch(self):
-        """校验不符要停下并给出可读原因，不能默默解压一个坏包。"""
-        parts = [("deadbeef", "m8tags-images.7z.001")]
-
-        def fake_download(url, dest):
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(b"not the real thing")
-            return dest
-
-        class _Proc:
-            returncode = 0
-
-        tool = self.tmp / "7z.exe"
-        tool.write_bytes(b"fake")
-
-        orig = (routes_mod._find_7z, routes_mod._release_parts, routes_mod._download,
-                routes_mod.subprocess.run, store.PLUGIN_DIR)
-        routes_mod._find_7z = lambda: (tool, "替身")
-        routes_mod._release_parts = lambda: parts
-        routes_mod._download = fake_download
-        routes_mod.subprocess.run = lambda *a, **k: _Proc()
-        store.PLUGIN_DIR = self.tmp
-        try:
-            routes_mod._fetch_worker()
-        finally:
-            (routes_mod._find_7z, routes_mod._release_parts, routes_mod._download,
-             routes_mod.subprocess.run, store.PLUGIN_DIR) = orig
-
-        self.assertEqual(routes_mod._fetch_state["stage"], "error")
-        self.assertIn("校验不符", routes_mod._fetch_state["error"])
-
-    def test_download_treats_416_as_already_complete(self):
-        """`.part` 已经装满整个文件时服务器回 416。
-
-        成因是「下完了、但还没走到改名就被中断」——关掉 ComfyUI、断电都算。
-        不能把它当失败：当失败就会永远卡在 416，重试多少次都一样。
-        这里断言它按「下完了」处理，把 .part 改名成正式文件。
-        """
-        dest = self.tmp / "m8tags-images.7z.001"
-        part = dest.with_suffix(dest.suffix + ".part")
-        part.write_bytes(b"whole file already on disk")
-
-        def fake_urlopen(req, timeout=None):
-            raise routes_mod.urllib.error.HTTPError(
-                req.full_url, 416, "Requested Range Not Satisfiable", {}, None)
-
-        orig = routes_mod.urllib.request.urlopen
-        routes_mod.urllib.request.urlopen = fake_urlopen
-        try:
-            got = routes_mod._download("https://example.invalid/x", dest)
-        finally:
-            routes_mod.urllib.request.urlopen = orig
-
-        self.assertEqual(got, dest)
-        self.assertTrue(dest.is_file(), "应该把 .part 改名成正式文件")
-        self.assertEqual(dest.read_bytes(), b"whole file already on disk")
-        self.assertFalse(part.exists(), ".part 应该已经改名走了")
-        self.assertEqual(routes_mod._sha256_of(dest),
-                         routes_mod._sha256_of(dest), "内容交给上层 SHA256 去判")
-
-    def test_download_reports_other_http_errors(self):
-        """416 之外的 HTTP 错误照旧抛出去 —— 别把真失败也吞成「下完了」。"""
-        dest = self.tmp / "m8tags-images.7z.001"
-        part = dest.with_suffix(dest.suffix + ".part")
-        part.write_bytes(b"half a file")
-
-        def fake_urlopen(req, timeout=None):
-            raise routes_mod.urllib.error.HTTPError(
-                req.full_url, 404, "Not Found", {}, None)
-
-        orig = routes_mod.urllib.request.urlopen
-        routes_mod.urllib.request.urlopen = fake_urlopen
-        try:
-            with self.assertRaises(routes_mod.urllib.error.HTTPError):
-                routes_mod._download("https://example.invalid/x", dest)
-        finally:
-            routes_mod.urllib.request.urlopen = orig
-        self.assertFalse(dest.exists(), "失败时不该生成正式文件")
-
-    def test_images_count_is_cached_until_forced(self):
-        """status 每 2 秒被问一次，而数一遍 4.5 万个文件实测要 0.45 秒 —— 必须缓存。
-
-        拉取收尾时用 force 拿到真实数字，轮询期间不许反复翻目录。
-        """
-        d = self.tmp / "images"
-        d.mkdir(parents=True)
-        (d / "a.jpg").write_bytes(b"x")
-        self.assertEqual(routes_mod._images_count(force=True), 1)
-
-        (d / "b.jpg").write_bytes(b"x")
-        self.assertEqual(routes_mod._images_count(), 1, "5 秒内该走缓存，不重新遍历")
-        self.assertEqual(routes_mod._images_count(force=True), 2, "force 要能立刻看到新文件")
-
-    def test_count_cache_does_not_leak_across_dirs(self):
-        """缓存必须认目录：换了目录（换 config、或者测试用临时目录）就当没缓存。"""
-        a = self.tmp / "a" / "images"
-        a.mkdir(parents=True)
-        (a / "1.jpg").write_bytes(b"x")
-        b = self.tmp / "b" / "images"
-        b.mkdir(parents=True)
-
-        orig = store.ATLAS_DIR
-        try:
-            store.ATLAS_DIR = self.tmp / "a"
-            self.assertEqual(routes_mod._images_count(), 1)
-            store.ATLAS_DIR = self.tmp / "b"
-            self.assertEqual(routes_mod._images_count(), 0, "换了目录还吃旧缓存")
-        finally:
-            store.ATLAS_DIR = orig
-
-    def test_status_reports_download_cache_usage(self):
-        """拉挂留下的缓存要报出来 —— 1.3 GB 压在插件目录里，用户有权看见。"""
-        tmp = self.tmp / "bin" / "_fetch_tmp"
-        tmp.mkdir(parents=True)
-        (tmp / "m8tags-images.7z.001").write_bytes(b"x" * 1000)
-        (tmp / "m8tags-images.7z.002.part").write_bytes(b"y" * 500)
-
-        data = body_of(call(routes_mod._handle_images_status, "/codex_atlas/images/status"))
-        self.assertEqual(data["tmp"]["files"], 2)
-        self.assertEqual(data["tmp"]["bytes"], 1500)
-
-    def test_status_reports_empty_cache_when_nothing_left(self):
-        data = body_of(call(routes_mod._handle_images_status, "/codex_atlas/images/status"))
-        self.assertEqual(data["tmp"]["files"], 0)
-        self.assertEqual(data["tmp"]["bytes"], 0)
-
-    def test_clean_removes_cache_but_never_touches_images(self):
-        """清理只动下载缓存，绝不许碰 atlas/images/ —— 那里是用户的图。"""
-        tmp = self.tmp / "bin" / "_fetch_tmp"
-        tmp.mkdir(parents=True)
-        (tmp / "m8tags-images.7z.001").write_bytes(b"x" * 1000)
-        (tmp / "m8tags-images.7z.001.part").write_bytes(b"x" * 300)
-
-        shots = self.tmp / "images" / "composition_style"
-        shots.mkdir(parents=True)
-        (shots / "a.jpg").write_bytes(b"real image")
-
-        # 下 7zr 时中断留下的半截文件，以及能用完的 7zr 本体
-        bin_dir = self.tmp / "bin"
-        (bin_dir / "7zr.exe.part").write_bytes(b"half a tool")
-        (bin_dir / "7zr.exe").write_bytes(b"a usable tool")
-
-        r = call(routes_mod._handle_images_clean, "/codex_atlas/images/clean", method="POST")
-        self.assertEqual(r.status, 200)
-        data = body_of(r)
-        self.assertTrue(data["ok"])
-        self.assertEqual(data["files"], 2)
-        self.assertEqual(data["freed"], 1300)
-
-        self.assertFalse(tmp.exists(), "缓存目录该被删掉")
-        self.assertTrue((shots / "a.jpg").is_file(), "图被误删了 —— 清理只该碰 bin/_fetch_tmp")
-        self.assertFalse((bin_dir / "7zr.exe.part").is_file(), "半截的 7zr 下载该被收掉")
-        self.assertTrue((bin_dir / "7zr.exe").is_file(), "7zr.exe 是能用的工具，不该被删")
-
-    def test_clean_refuses_while_a_fetch_is_running(self):
-        """拉取中不许清：那会把 worker 正在写的文件从底下抽走。"""
-        tmp = self.tmp / "bin" / "_fetch_tmp"
-        tmp.mkdir(parents=True)
-        (tmp / "m8tags-images.7z.001.part").write_bytes(b"x" * 100)
-
-        class _Alive:
-            def is_alive(self):
-                return True
-
-        orig = routes_mod._fetch_thread
-        routes_mod._fetch_thread = _Alive()
-        try:
-            r = call(routes_mod._handle_images_clean, "/codex_atlas/images/clean", method="POST")
-        finally:
-            routes_mod._fetch_thread = orig
-
-        self.assertEqual(r.status, 409)
-        self.assertTrue((tmp / "m8tags-images.7z.001.part").is_file(), "拒绝的时候不该动文件")
-
-    def test_readme_text_exists_for_post_extract_write(self):
-        """解压后要写进 images/README.txt 的那段内容必须非空。
-
-        atlas/images/ 解压前就存在（仓库里带着这个文件），解压是往里合并而不是重建，
-        所以这个说明文件得由代码显式补 —— 内容为空就等于没补。
-        """
-        self.assertIn("images/", routes_mod._IMAGES_README)
-        self.assertGreater(len(routes_mod._IMAGES_README.strip()), 50)
 
 
 if __name__ == "__main__":

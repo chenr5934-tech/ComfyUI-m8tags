@@ -55,7 +55,7 @@ class CodexAtlasTag:
     RETURN_NAMES = ("positive", "negative")
     FUNCTION = "emit"
     CATEGORY = "法典图鉴"
-    DESCRIPTION = "把在线 NovelAI 提示词法典接进 ComfyUI：运行前自动随机抽词、NAI↔A1111 语法转换、站内小窗浏览。"
+    DESCRIPTION = "把 NovelAI 提示词法典接进 ComfyUI：窗口直连线上站点，可把词条推送到节点，带运行前自动随机抽词与 NAI↔A1111 语法转换。"
     OUTPUT_NODE = False
 
     @classmethod
@@ -104,7 +104,7 @@ class CodexAtlasClipEncode:
                 }),
                 "codex": ([CODEX_ANY], {
                     "default": CODEX_ANY,
-                    "tooltip": "随机抽词的来源法典，列表实时来自本地数据。选「全部法典」时不会抽画师词典里的词条；想抽就明确选中那一部。",
+                    "tooltip": "随机抽词的来源法典，列表实时来自线上站点。选「全部法典」时不会抽画师词典里的词条；想抽就明确选中那一部。",
                 }),
             },
             "optional": {

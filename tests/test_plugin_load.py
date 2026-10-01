@@ -90,23 +90,33 @@ class TestPluginLoad(unittest.TestCase):
     def test_routes_registered_with_expected_paths(self):
         load_plugin(self.table)
         paths = {(m, p) for m, p, _ in self.table.entries}
-        self.assertIn(("GET", "/codex_atlas/codexes"), paths)
-        self.assertIn(("GET", "/codex_atlas/random"), paths)
-        self.assertIn(("GET", "/codex_atlas/entry"), paths, "已选栏取词条的接口没注册")
+        self.assertIn(("GET", "/codex_atlas/codexes"), paths, "法典清单接口没注册，下拉就空了")
+        self.assertIn(("GET", "/codex_atlas/random"), paths, "随机抽词接口没注册")
         self.assertIn(("GET", "/codex_atlas/status"), paths)
-        self.assertIn(("GET", "/codex_atlas/atlas/{tail:.*}"), paths, "静态伺服路由没注册，小窗会打不开站点")
+        self.assertIn(("GET", "/codex_atlas/atlas/{tail:.*}"), paths, "静态伺服路由没注册，图库页会打不开")
         self.assertIn(("POST", "/codex_atlas/self-image"), paths, "存图接口没注册，图库就只能靠手动选文件夹")
         self.assertIn(("POST", "/codex_atlas/self-image/delete"), paths, "删图接口没注册（它走 unlink，不可逆，更要有回归保护）")
         self.assertIn(("POST", "/codex_atlas/self-image/group"), paths, "分组接口没注册，分组只能暂存在本机")
-        self.assertIn(("GET", "/codex_atlas/images/status"), paths, "例图状态接口没注册，前端不知道要不要提示「拉取例图」")
-        self.assertIn(("POST", "/codex_atlas/images/fetch"), paths, "例图拉取接口没注册，一键拉取就没了")
-        self.assertIn(("POST", "/codex_atlas/images/clean"), paths, "清理接口没注册，拉挂留下的 1.3 GB 下载缓存就没地方清")
+
+    def test_removed_routes_stay_removed(self):
+        """改造砍掉的接口不能再冒出来。
+
+        /entry 是给本地法典数据补语法版本用的，/images/* 是例图一键拉取 ——
+        本地数据已经删了、拉取整套也去掉了，这些路由要是还在，说明有旧代码没清干净。
+        """
+        load_plugin(self.table)
+        paths = {(m, p) for m, p, _ in self.table.entries}
+        for gone in (("GET", "/codex_atlas/entry"),
+                     ("GET", "/codex_atlas/images/status"),
+                     ("POST", "/codex_atlas/images/fetch"),
+                     ("POST", "/codex_atlas/images/clean")):
+            self.assertNotIn(gone, paths, "这条路由本该删掉的：{}".format(gone))
 
     def test_all_registered_routes_are_covered_by_this_test(self):
         """路由数量和上面逐条断言的条数要对得上 —— 以后新增接口漏了断言，这里会红。"""
         load_plugin(self.table)
         paths = {(m, p) for m, p, _ in self.table.entries}
-        self.assertEqual(len(paths), 11, f"路由数变了，请补断言：{sorted(paths)}")
+        self.assertEqual(len(paths), 7, f"路由数变了，请补断言：{sorted(paths)}")
 
     def test_node_contract_matches_frontend_constants(self):
         """节点签名是前后端的契约，改坏了前端会静默失效。"""
@@ -131,21 +141,28 @@ class TestPluginLoad(unittest.TestCase):
         self.assertRegex(text, rf'(?m)^const SYNTAX_A1111 = "{re.escape(syntax_options[0])}";\s*$')
         self.assertRegex(text, rf'(?m)^const SYNTAX_NAI = "{re.escape(syntax_options[1])}";\s*$')
 
-    def test_frontend_actually_uses_the_clean_endpoint(self):
-        """后端加了清理接口，前端得真的用上，否则 1.3 GB 缓存还是没地方清。"""
-        text = (PKG_DIR / "js" / "codex_atlas.js").read_text("utf-8")
-        self.assertIn('apiPost("/images/clean"', text, "前端没调清理接口")
-        self.assertIn('apiGet("/images/status"', text, "前端没读状态，就不会知道缓存占了多少")
-        self.assertIn("清理下载缓存", text, "提示条上没有清理按钮")
+    def test_frontend_talks_to_the_online_site(self):
+        """窗口正面是线上站点这件事，前后端两边都得对上。
 
-    def test_fetch_download_dir_is_gitignored(self):
-        """一键拉取把 1.3 GB 分卷下到插件目录的 bin/ 里。
-
-        这条要是漏了，用户手一滑 git add -A，整个包就进仓库了 ——
-        提交体积涨 1.3 GB，push 也基本推不上去。
+        前端得真的把 iframe 指向线上站点、真的带那两个默认参数；
+        本地那份法典站点（index.html / app.js / data/）已经删了，
+        代码里再出现它的引用就是在往回走。
         """
-        lines = [ln.strip() for ln in (PKG_DIR / ".gitignore").read_text("utf-8").splitlines()]
-        self.assertIn("bin/", lines, "bin/ 没被忽略：拉取下来的分卷会被提交进仓库")
+        text = (PKG_DIR / "js" / "codex_atlas.js").read_text("utf-8")
+        self.assertIn('const SITE_BASE = "https://novelai.quicktagcloud.com/";', text,
+                      "前端没把窗口指向线上站点")
+        self.assertIn('const SITE_CODEX = "artist_nai5_personal";', text, "默认法典丢了")
+        self.assertIn('const SITE_PATH = "zuud7l";', text, "默认路径码丢了")
+        self.assertIn("gallery.html", text, "图库页的入口没了")
+        self.assertNotIn('ATLAS_BASE + "index.html"', text, "还在引用已删掉的本地站点首页")
+
+    def test_frontend_uses_the_self_image_endpoints(self):
+        """后端留着的存图接口，前端得真的用上。"""
+        text = (PKG_DIR / "js" / "codex_atlas.js").read_text("utf-8")
+        gallery = (PKG_DIR / "atlas" / "gallery.html").read_text("utf-8")
+        self.assertIn("gallery.html", text)
+        self.assertIn("gallery.js", gallery, "图库页没加载图库脚本")
+        self.assertIn("self-image/index.js", gallery, "图库页没加载图库索引")
 
     def test_clip_encode_node_is_ours_not_builtin(self):
         """本插件自己的文本编码节点：输出 CONDITIONING，等于把内置节点那份功能搬过来，

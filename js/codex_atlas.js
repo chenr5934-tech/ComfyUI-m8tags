@@ -12,8 +12,13 @@
 
 import { app } from "/scripts/app.js";
 
-/* 离线站点由插件后端自己伺服（见 py/routes.py 的 /codex_atlas/atlas/），
-   站点文件就在 PROJECTS-项目/本地离线提示词法典 里 —— 同源、不联网。 */
+/* 窗口正面 = 线上站点，iframe 直接指过去 —— 站点自己的功能（NAI↔SD 语法、
+   Tag 中转站、收藏、灯箱、筛选）原样可用，插件不再自带一份本地站点副本。
+   跨域读不到它内部，所以「推送到节点」走剪贴板桥：在站点里点复制，回到这里取一次。 */
+const SITE_BASE = "https://novelai.quicktagcloud.com/";
+const SITE_CODEX = "artist_nai5_personal";   /* 默认落点：NAI v5 画师词典 */
+const SITE_PATH = "zuud7l";                  /* 对应 ?p= 的路径码 */
+/* 图库是插件自己伺服的一页（同源），窗口在「站点」和「我的图库」之间切换 */
 const ATLAS_BASE = "/codex_atlas/atlas/";
 const API_BASE = "/codex_atlas";
 /* 本插件自己的节点 —— 按钮长在它们自己身上，不去动 ComfyUI 内置的节点 */
@@ -351,27 +356,41 @@ function savePicks() {
   } catch (err) { /* 无痕模式禁写存储时静默跳过 */ }
 }
 
-function buildAtlasUrl({ codexId, query } = {}) {
-  const url = new URL(ATLAS_BASE + "index.html", window.location.origin);
-  if (codexId) url.searchParams.set("c", codexId);
+/* 拼线上站点的地址。站点的路由认这几个参数（读站点的 router.js 得来的）：
+ *   c / codex  法典 id          p         路径码（深链到某个目录）
+ *   q          搜索词           scope     搜索范围（codex / site）
+ *   entry      直达某条词条      view=favorites  收藏视图
+ * 搜到一条好词想把位置记下来，收藏里存的就是这种地址。 */
+function buildAtlasUrl({ codexId, query, entry, path, favs } = {}) {
+  const url = new URL(SITE_BASE);
+  if (favs) {
+    url.searchParams.set("view", "favorites");
+    return url.href;
+  }
+  url.searchParams.set("c", codexId || SITE_CODEX);
+  if (path !== undefined) {
+    if (path) url.searchParams.set("p", path);   /* 显式传空串 = 不回退默认路径 */
+  } else if (!codexId && !query) {
+    url.searchParams.set("p", SITE_PATH);
+  }
   const q = String(query || "").trim();
   if (q) {
     url.searchParams.set("q", q);
     /* 选了法典就在法典内搜，没选才全站搜；进站后还能再手动切范围 */
     url.searchParams.set("scope", codexId ? "codex" : "site");
   }
-  /* 每次都带一个时间戳，逼浏览器重新读 index.html。
-     站点里的脚本被浏览器缓存住旧版本时，表现是"某个脚本没跑起来"、
-     "按钮点了没反应"，而磁盘上的文件明明是对的 —— 只要入口 HTML 永远
-     是新的，它引用的脚本名字/版本也就跟着是新的，这类问题从根上没了。 */
-  url.searchParams.set("_", String(Date.now()));
+  if (entry) url.searchParams.set("entry", entry);
   return url.href;
+}
+
+/* 图库那一页（同源，插件后端自己伺服的） */
+function galleryUrl() {
+  return new URL(ATLAS_BASE + "gallery.html", window.location.origin).href;
 }
 
 function closeAtlasWindow() {
   if (!atlas.mask) return;
   if (atlas.onKey) window.removeEventListener("keydown", atlas.onKey, true);
-  if (atlas.stopImgPoll) { atlas.stopImgPoll(); atlas.stopImgPoll = null; }
   /* 先掐掉 src 再摘 DOM：站点页面不小，别让它在后台继续加载 */
   if (atlas.frame) atlas.frame.src = "about:blank";
   atlas.mask.remove();
@@ -422,23 +441,45 @@ function ensureAtlasStyle() {
     .codex-atlas-libbar button:hover{background:#115e59;}
     .codex-atlas-libbar button.on{background:transparent;border-color:#14b8a6;
       color:#5eead4;font-weight:400;}
-    /* 例图提示条：只在「一张配图都没有」时出现。它是提示不是入口，
-       所以用暗底 + 琥珀色描边，不抢占图库那条的按钮视觉。
-       注意 [hidden] 那条不能省 —— display:flex 会盖掉 hidden 属性，
-       否则这个条子永远收不起来。 */
-    .codex-atlas-imgbar{display:flex;align-items:center;gap:9px;padding:7px 12px;
-      background:#2a2118;border-bottom:1px solid #78350f;color:#fde68a;flex:none;
-      font:12.5px/1.4 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;}
-    .codex-atlas-imgbar[hidden]{display:none;}
-    .codex-atlas-imgbar .ca-img-text{flex:1;min-width:0;overflow:hidden;
-      text-overflow:ellipsis;white-space:nowrap;}
-    .codex-atlas-imgbar .ca-img-btn{padding:4px 13px;border-radius:6px;cursor:pointer;
-      border:1px solid #d97706;background:#b45309;color:#fffbeb;font-size:12px;
-      font-family:inherit;font-weight:600;white-space:nowrap;transition:background .12s;}
-    .codex-atlas-imgbar .ca-img-btn:hover:not(:disabled){background:#92400e;}
-    .codex-atlas-imgbar .ca-img-btn:disabled{opacity:.6;cursor:default;}
+    .ca-tools{display:flex;gap:6px;padding:8px 10px;border-bottom:1px solid #3f3f46;flex:none;flex-wrap:wrap;}
+    .ca-tools button{flex:1;min-width:0;padding:6px 8px;border-radius:6px;cursor:pointer;
+      border:1px solid #52525b;background:#27272a;color:#e4e4e7;font-size:12px;font-family:inherit;
+      white-space:nowrap;transition:background .12s;}
+    .ca-tools button:hover{background:#3f3f46;}
+    .ca-tools .ca-tool-main{background:#0f766e;border-color:#14b8a6;color:#e6fffb;font-weight:600;}
+    .ca-tools .ca-tool-main:hover{background:#115e59;}
+    .ca-field-right{display:flex;align-items:center;gap:8px;}
+    .ca-field-btn{padding:2px 9px;border-radius:5px;cursor:pointer;border:1px solid #52525b;
+      background:#27272a;color:#d4d4d8;font-size:11px;font-family:inherit;}
+    .ca-field-btn:hover{background:#3f3f46;color:#fff;}
+    .ca-favs{position:absolute;inset:0;background:#1f1f23;display:flex;flex-direction:column;z-index:2;}
+    .ca-favs[hidden]{display:none;}
+    .ca-favs-head{display:flex;align-items:center;justify-content:space-between;padding:9px 12px;
+      border-bottom:1px solid #3f3f46;font-weight:600;flex:none;}
+    .ca-favs-close{border:1px solid #52525b;background:transparent;color:#a1a1aa;border-radius:6px;
+      padding:3px 9px;cursor:pointer;font-size:11.5px;font-family:inherit;}
+    .ca-favs-close:hover{color:#e4e4e7;border-color:#71717a;}
+    .ca-favs-tools{display:flex;gap:6px;padding:8px 10px;border-bottom:1px solid #3f3f46;flex:none;flex-wrap:wrap;}
+    .ca-favs-tools input{flex:1;min-width:70px;padding:5px 8px;border-radius:6px;background:#18181b;
+      color:#e4e4e7;border:1px solid #3f3f46;outline:none;font-size:12px;font-family:inherit;}
+    .ca-favs-tools button{padding:5px 9px;border-radius:6px;cursor:pointer;border:1px solid #52525b;
+      background:#27272a;color:#e4e4e7;font-size:11.5px;font-family:inherit;white-space:nowrap;}
+    .ca-favs-tools button:hover{background:#3f3f46;}
+    .ca-favs-list{flex:1;overflow:auto;padding:6px 8px;}
+    .ca-fav-empty{color:#71717a;font-size:12px;padding:10px 6px;line-height:1.8;white-space:pre-line;}
+    .ca-fav{display:flex;align-items:center;gap:6px;padding:6px;border-radius:6px;margin-bottom:5px;
+      background:#27272a;border:1px solid #3f3f46;}
+    .ca-fav-body{flex:1;min-width:0;}
+    .ca-fav-title{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .ca-fav-sub{font-size:10.5px;color:#a1a1aa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .ca-fav select{background:#18181b;color:#d4d4d8;border:1px solid #3f3f46;border-radius:5px;
+      font-size:11px;padding:2px 4px;font-family:inherit;max-width:84px;}
+    .ca-fav button{border:1px solid #52525b;background:transparent;color:#a1a1aa;border-radius:5px;
+      padding:2px 6px;cursor:pointer;font-size:11px;font-family:inherit;}
+    .ca-fav button:hover{color:#e4e4e7;}
+    .ca-fav .ca-fav-x:hover{color:#ff6b6b;border-color:#ff6b6b;}
     .codex-atlas-body{flex:1;display:flex;min-height:0;}    .codex-atlas-frame{flex:1;min-width:0;border:0;background:#fff;}
-    .codex-atlas-side{width:334px;flex:none;display:flex;flex-direction:column;
+    .codex-atlas-side{width:334px;flex:none;display:flex;flex-direction:column;position:relative;
       background:#1f1f23;border-left:1px solid #3f3f46;color:#e4e4e7;
       font:12.5px/1.45 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;}
     .ca-side-head{display:flex;align-items:center;justify-content:space-between;
@@ -474,21 +515,21 @@ function ensureAtlasStyle() {
 }
 
 function openAtlasWindow({ node, codexId, query } = {}) {
+  if (atlas.mask) closeAtlasWindow();
   ensureAtlasStyle();
-  if (atlas.mask) closeAtlasWindow(); /* 单例：避免叠出多层小窗 */
 
-  atlas.node = node || null;
-  /* 关窗不再清空已选栏，所以内存里通常还有；只有刷新过页面 / 首次打开时是空的，
-     那就从 localStorage 捞回来。 */
-  if (!atlas.picks || !atlas.picks.length) atlas.picks = loadPicks();
+  atlas.node = node;
+  atlas.picks = loadPicks();
+  atlas.view = "site";
+  atlas.favs = loadFavs();
 
-  /* ---- 顶部工具栏 ---- */
   const mask = document.createElement("div");
   mask.className = "codex-atlas-mask";
 
   const panel = document.createElement("div");
   panel.className = "codex-atlas-panel";
 
+  /* ------------------------------- 顶栏 ------------------------------- */
   const bar = document.createElement("div");
   bar.className = "codex-atlas-bar";
 
@@ -498,259 +539,63 @@ function openAtlasWindow({ node, codexId, query } = {}) {
 
   const hint = document.createElement("span");
   hint.className = "ca-hint";
-  hint.textContent = "本地离线法典 · 不联网";
+  hint.textContent = "线上站点全功能 · 在站点卡片上点复制，回来点「从剪贴板取词」";
 
   const search = document.createElement("input");
   search.type = "search";
-  search.placeholder = "站内搜索词条 / tag…";
+  search.placeholder = "在站点里搜词条 / tag…";
   search.autocomplete = "off";
   search.spellcheck = false;
 
   const goBtn = document.createElement("button");
   goBtn.textContent = "搜索";
 
+  const libBtn = document.createElement("button");
+  libBtn.textContent = "我的图库";
+  libBtn.title = "上传自己生成的图，读出底模 / LoRA / 提示词（存在插件的 atlas/self-image/）";
+
+  const openBtn = document.createElement("button");
+  openBtn.textContent = "浏览器打开";
+  openBtn.title = "在独立标签页里打开线上站点";
+
   const closeBtn = document.createElement("button");
   closeBtn.textContent = "关闭";
   closeBtn.className = "ca-close";
 
-  /* ---- 「我的图库」独立一条：夹在插件标题行和站点之间 ----
-     站点就在下面的 iframe 里，所以图库的完整功能（上传、审阅、分组、删除、
-     详情、加入已选栏）跟独立打开站点时一模一样 —— 这一条只是给一个一定
-     看得见的入口，不用去 iframe 里翻站点顶栏那个小按钮。 */
-  const libBar = document.createElement("div");
-  libBar.className = "codex-atlas-libbar";
-  const libDot = document.createElement("span");
-  libDot.className = "ca-lib-dot";
-  libDot.textContent = "◆";
+  bar.append(title, hint, search, goBtn, libBtn, openBtn, closeBtn);
 
-  const libTitle = document.createElement("span");
-  libTitle.className = "ca-lib-title";
-  libTitle.textContent = "我的图库";
-
-  const libHint = document.createElement("span");
-  libHint.className = "ca-lib-hint";
-  libHint.textContent = "上传自己生成的图，读出底模 / LoRA / 提示词，存进站点目录的 self-image/";
-
-  const libBtn = document.createElement("button");
-
-  function syncLibBtn() {
-    let inLib = false;
-    try {
-      const w = atlas.frame && atlas.frame.contentWindow;
-      const view = w && w.document && w.document.getElementById("selfView");
-      inLib = !!view && !view.hidden;
-    } catch (e) { /* 拿不到就当在法典视图 */ }
-    libBtn.textContent = inLib ? "← 回到法典" : "打开图库";
-    libBtn.classList.toggle("on", inLib);
-    libHint.textContent = inLib
-      ? "正在看我的图库 · 功能和独立打开站点时一致"
-      : "上传自己生成的图，读出底模 / LoRA / 提示词，存进站点目录的 self-image/";
-  }
-
-  libBtn.addEventListener("click", async () => {
-    const w = atlas.frame && atlas.frame.contentWindow;
-    if (!w || !w.SelfGallery) {
-      /* 光说"没就绪"定位不到东西。主动去问一次服务端：这两个脚本到底
-         返回了什么状态码、多少字节 —— 是 404、还是拿到了内容却没执行，
-         这两种情况的修法完全不同。 */
-      let marks = "";
-      try {
-        const has = (k) => { try { return k in w; } catch (e) { return false; } };
-        const codexOk = has("QTC_META");
-        marks = [
-          "data " + (codexOk ? "✓" : "✗"),
-          "meta " + (has("SelfMeta") ? "✓" : "✗"),
-          "app " + (codexOk && w.document.querySelector("#results .card") ? "✓" : "✗"),
-          "gallery " + (has("SelfGallery") ? "✓" : "✗"),
-        ].join(" · ");
-      } catch (e) {
-        marks = "（读不到 iframe 内部）";
-      }
-
-      let probe = "服务端探测失败";
-      try {
-        const parts = [];
-        for (const f of ["gallery-meta.js", "gallery.js"]) {
-          const res = await w.fetch(`${f}?probe=${Date.now()}`, { cache: "no-store" });
-          const txt = await res.text();
-          const head = txt.slice(0, 40).replace(/\s+/g, " ");
-          parts.push(`${f} → HTTP ${res.status} ${txt.length}B 「${head}」`);
-        }
-        probe = parts.join("\n");
-      } catch (e) {
-        probe = "服务端探测异常：" + ((e && e.message) || e);
-      }
-
-      toast(`脚本状态 ${marks}\n${probe}\n正在重新载入…`, "error", 12000);
-      console.warn("[法典图鉴] 图库脚本诊断：", marks, "\n", probe);
-      try { atlas.frame.src = buildAtlasUrl({ codexId: "", query: "" }); } catch (e) { /* 忽略 */ }
-      return;
-    }
-    const view = w.document.getElementById("selfView");
-    w.SelfGallery.showSelf(!view || view.hidden);
-    syncLibBtn();
-  });
-
-  libBar.append(libDot, libTitle, libHint, libBtn);
-  syncLibBtn();   /* 先把文案摆好，别让按钮空着等第一次 load */
-
-  /* 外置打开：站点跟 ComfyUI 同源同端口，直接开这个路由就是完整可用的站点，
-     窗口独立、不再受节点编辑器挤占。想彻底脱离 ComfyUI（关掉 CUI 也能用），
-     就去 atlas/ 里双击「启动法典.bat」，那边起的是独立服务。 */
-  const openBtn = document.createElement("button");
-  openBtn.textContent = "浏览器打开";
-  openBtn.title = "在独立标签页里打开法典（功能与站内小窗一致；想完全脱离 ComfyUI 就用 atlas/启动法典.bat）";
-  openBtn.addEventListener("click", () => {
-    window.open(ATLAS_BASE + "index.html", "_blank", "noopener");
-  });
-
-  bar.append(title, hint, search, goBtn, openBtn, closeBtn);
-
-  /* ---- 例图提示条 ----
-     例图 1.3 GB，默认不打进仓库，所以首次装完卡片是没预览图的。
-     没配图不影响任何功能（检索/复制/已选栏/推送都照常），所以这里只是提示 + 给个
-     一键拉取的口子：后端自己下分卷、（必要时）下 7zr、解压到 atlas/images/。
-     只有「一张图都没有」时才出现，打扰越小越好。 */
-  const imgBar = document.createElement("div");
-  imgBar.className = "codex-atlas-imgbar";
-  imgBar.hidden = true;
-
-  const imgText = document.createElement("span");
-  imgText.className = "ca-img-text";
-  const imgBtn = document.createElement("button");
-  imgBtn.className = "ca-img-btn";
-  /* 拉挂一次会故意留着已下好的分卷（重试就不用从零再下 1.3 GB），
-     所以得有个地方让它现形、并且一键清掉 —— 否则就是悄悄占着磁盘。 */
-  const imgClearBtn = document.createElement("button");
-  imgClearBtn.className = "ca-img-btn";
-  imgClearBtn.textContent = "清理下载缓存";
-  imgClearBtn.hidden = true;
-  imgBar.append(imgText, imgBtn, imgClearBtn);
-
-  function fmtSize(bytes) {
-    const n = Number(bytes) || 0;
-    if (n >= 1073741824) return (n / 1073741824).toFixed(2) + " GB";
-    if (n >= 1048576) return Math.round(n / 1048576) + " MB";
-    if (n > 0) return Math.max(1, Math.round(n / 1024)) + " KB";
-    return "0";
-  }
-
-  let imgPolling = null;
-  function stopImgPoll() {
-    if (imgPolling) { clearInterval(imgPolling); imgPolling = null; }
-  }
-  atlas.stopImgPoll = stopImgPoll;   /* 关窗时要停掉轮询，别让定时器一直跑 */
-
-  function renderImgState(st) {
-    const f = st.fetch || {};
-    const tmp = st.tmp || {};
-    const busy = ["checking", "tool", "downloading", "extracting"].includes(f.stage);
-
-    /* 有缓存要清的时候，哪怕图已经有了也得把这条摆出来 ——
-       不然那 1.3 GB 就永远看不见。拉取中的不算：那是 worker 正在写的文件。 */
-    const showClear = !busy && (tmp.files || 0) > 0;
-    imgClearBtn.hidden = !showClear;
-    if (showClear) imgClearBtn.textContent = `清理下载缓存（${fmtSize(tmp.bytes)}）`;
-    imgBtn.hidden = false;
-
-    if (busy) {
-      imgBar.hidden = false;
-      imgText.textContent = f.message || "正在拉取例图…";
-      imgBtn.textContent = "进行中…";
-      imgBtn.disabled = true;
-      return;
-    }
-    imgBtn.disabled = false;
-    if (f.stage === "done") {
-      imgBar.hidden = false;
-      imgText.textContent = f.message || "例图已就绪";
-      imgBtn.textContent = "完成";
-      imgBtn.disabled = true;
-      stopImgPoll();
-      setTimeout(() => { imgBar.hidden = true; }, 6000);
-      return;
-    }
-    if (f.stage === "error") {
-      imgBar.hidden = false;
-      imgText.textContent = f.error || "拉取失败";
-      imgBtn.textContent = "重试";
-      return;
-    }
-    if (st.count > 0 && !showClear) {     /* 有图、又没缓存要清，就别打扰 */
-      imgBar.hidden = true;
-      stopImgPoll();
-      return;
-    }
-    imgBar.hidden = false;
-    if (st.count > 0) {
-      imgText.textContent = "上次拉取留下了下载缓存。清掉能腾出磁盘，图本身不受影响";
-      imgBtn.hidden = true;               /* 已经有图了，不用再拉 */
-      return;
-    }
-    imgText.textContent = "卡片还没有预览图。可以一键拉取（约 1.3 GB，需联网；不装也能正常用）";
-    imgBtn.textContent = "拉取例图";
-  }
-
-  async function refreshImgState() {
-    try {
-      const st = await apiGet("/images/status");
-      renderImgState(st);
-      if (st.running) {
-        if (!imgPolling) {
-          imgPolling = setInterval(() => {
-            apiGet("/images/status").then(renderImgState).catch(() => {});
-          }, 2000);
-        }
-      } else {
-        /* 拉完了 / 拉挂了就把定时器停掉。原来只在 done 和「有图」两条路上停，
-           失败那条路会一直每 2 秒问一次，直到关掉窗口。 */
-        stopImgPoll();
-      }
-    } catch (err) {
-      imgBar.hidden = true;   /* 后端没有这个接口（旧版本）时别摆一条死信息 */
-    }
-  }
-
-  imgBtn.addEventListener("click", async () => {
-    imgBtn.disabled = true;
-    try {
-      await apiPost("/images/fetch", { confirm: true });
-      toast("开始拉取例图，下载期间其它功能照常可用", "ok", 5000);
-      refreshImgState();
-    } catch (err) {
-      imgBtn.disabled = false;
-      toast(`拉取没起来：${err.message}`, "error", 6000);
-    }
-  });
-
-  imgClearBtn.addEventListener("click", async () => {
-    imgClearBtn.disabled = true;
-    try {
-      const r = await apiPost("/images/clean", {});
-      toast(`已清掉下载缓存：${r.files} 个文件，腾出 ${fmtSize(r.freed)}`, "ok", 4500);
-      refreshImgState();
-    } catch (err) {
-      toast(`清理失败：${err.message}`, "error", 5000);
-    } finally {
-      imgClearBtn.disabled = false;
-    }
-  });
-
-  refreshImgState();
-
-  /* ---- 主体：左边站点，右边已选栏 ---- */
+  /* ------------------------------- 主体 ------------------------------- */
   const body = document.createElement("div");
   body.className = "codex-atlas-body";
 
   const frame = document.createElement("iframe");
   frame.className = "codex-atlas-frame";
-  frame.setAttribute("allow", "clipboard-write; clipboard-read");
+  /* 站点自己要写剪贴板（复制按钮），这里放行；父页面读剪贴板是另一回事，
+     走的是 ComfyUI 这个源自己的权限 */
+  frame.setAttribute("allow", "clipboard-read; clipboard-write");
   frame.src = buildAtlasUrl({ codexId, query });
-  /* iframe 每次重载（站内搜索、换法典）都会回到法典视图，按钮状态得跟着复位 */
-  frame.addEventListener("load", () => { syncLibBtn(); });
 
   const side = document.createElement("div");
   side.className = "codex-atlas-side";
+
+  /* ---- 取词：站点是跨域的，读不到它选中了什么，只能靠剪贴板过渡 ---- */
+  const toolRow = document.createElement("div");
+  toolRow.className = "ca-tools";
+
+  const pickPosBtn = document.createElement("button");
+  pickPosBtn.className = "ca-tool-main";
+  pickPosBtn.textContent = "＋ 从剪贴板取词";
+  pickPosBtn.title = "先在站点卡片上点「全部」或「正向」复制，再点这里";
+
+  const pickNegBtn = document.createElement("button");
+  pickNegBtn.textContent = "－ 取负面";
+  pickNegBtn.title = "先在站点卡片上点「负面」复制，再点这里";
+
+  const favBtn = document.createElement("button");
+  favBtn.textContent = "★ 收藏";
+  favBtn.title = "把当前已选的内容存进收藏；也能回看存过的词条和网页位置";
+
+  toolRow.append(pickPosBtn, pickNegBtn, favBtn);
 
   const sideHead = document.createElement("div");
   sideHead.className = "ca-side-head";
@@ -764,26 +609,54 @@ function openAtlasWindow({ node, codexId, query } = {}) {
   const picks = document.createElement("div");
   picks.className = "ca-picks";
 
-  /* 预览框：可编辑，字数实时同步 */
-  const mkField = (label, rows) => {
+  /* 预览框：可编辑，字数实时同步；label 右边挂一个动作按钮 */
+  const mkField = (label, rows, action) => {
     const field = document.createElement("div");
     field.className = "ca-field";
     const lab = document.createElement("div");
     lab.className = "ca-field-label";
     const nameEl = document.createElement("span");
     nameEl.textContent = label;
+    const right = document.createElement("span");
+    right.className = "ca-field-right";
     const numEl = document.createElement("span");
-    lab.append(nameEl, numEl);
+    if (action) {
+      const btn = document.createElement("button");
+      btn.className = "ca-field-btn";
+      btn.textContent = action.text;
+      btn.title = action.title || "";
+      btn.addEventListener("click", () => action.run());
+      right.append(btn);
+    }
+    right.append(numEl);
+    lab.append(nameEl, right);
     const area = document.createElement("textarea");
     area.rows = rows;
     area.spellcheck = false;
     const sync = () => { numEl.textContent = `${area.value.length} 字`; };
-    area.addEventListener("input", sync);
+    area.addEventListener("input", () => { sync(); node.__codexAtlasRaw = null; });
     field.append(lab, area);
     return { field, area, sync };
   };
 
-  const posField = mkField("POSITIVE", 8);
+  const posField = mkField("POSITIVE（推送出去的就是这里）", 9, {
+    text: "转成 A1111",
+    title: "把 NAI 语法（1.3::词::）就地转成 A1111 权重语法（词:1.3）；权重为负的会挪进负向框",
+    run: () => {
+      const conv = convertTagsString(posField.area.value);
+      const merged = mergeTags([conv.positive]);
+      posField.area.value = merged;
+      posField.sync();
+      if (conv.negative) {
+        const negMerge = mergeTags([negField.area.value, conv.negative]);
+        negField.area.value = negMerge;
+        negField.sync();
+        toast("已转成 A1111 语法；原本权重为负的那批挪到负向框了", "ok", 4200);
+      } else {
+        toast("已转成 A1111 语法", "ok", 2600);
+      }
+    },
+  });
   const negField = mkField("NEGATIVE", 6);
 
   const foot = document.createElement("div");
@@ -795,9 +668,40 @@ function openAtlasWindow({ node, codexId, query } = {}) {
   pushBtn.textContent = "推送到节点";
   foot.append(clearBtn, pushBtn);
 
-  side.append(sideHead, picks, posField.field, negField.field, foot);
+  /* ------------------------------- 收藏板 ------------------------------ */
+  const favPanel = document.createElement("div");
+  favPanel.className = "ca-favs";
+  favPanel.hidden = true;
+
+  const favHead = document.createElement("div");
+  favHead.className = "ca-favs-head";
+  const favTitle = document.createElement("span");
+  favTitle.textContent = "★ 收藏";
+  const favClose = document.createElement("button");
+  favClose.className = "ca-favs-close";
+  favClose.textContent = "← 回到已选栏";
+  favHead.append(favTitle, favClose);
+
+  const favTools = document.createElement("div");
+  favTools.className = "ca-favs-tools";
+  const favGroupInput = document.createElement("input");
+  favGroupInput.type = "text";
+  favGroupInput.placeholder = "新分类名…";
+  const favGroupAdd = document.createElement("button");
+  favGroupAdd.textContent = "＋ 建分类";
+  const favSavePage = document.createElement("button");
+  favSavePage.textContent = "存当前网页位置";
+  favSavePage.title = "把窗口里现在这一页（法典 + 路径 + 搜索词）存成收藏，下次一点直接跳过去";
+  favTools.append(favGroupInput, favGroupAdd, favSavePage);
+
+  const favList = document.createElement("div");
+  favList.className = "ca-favs-list";
+
+  favPanel.append(favHead, favTools, favList);
+
+  side.append(toolRow, sideHead, picks, posField.field, negField.field, foot, favPanel);
   body.append(frame, side);
-  panel.append(bar, libBar, imgBar, body);
+  panel.append(bar, body);
   mask.appendChild(panel);
   document.body.appendChild(mask);
 
@@ -808,17 +712,48 @@ function openAtlasWindow({ node, codexId, query } = {}) {
   atlas.posEl = posField.area;
   atlas.negEl = negField.area;
   atlas.countEl = count;
+  atlas.favPanel = favPanel;
+  atlas.favListEl = favList;
+  atlas.favGroupInput = favGroupInput;
   posField.sync();
   negField.sync();
   renderPicks();
+  renderFavs();
 
+  /* ------------------------------- 事件 ------------------------------- */
   const runSearch = () => {
+    atlas.view = "site";
+    syncViewBtn();
     frame.src = buildAtlasUrl({ codexId, query: search.value.trim() });
   };
   goBtn.addEventListener("click", runSearch);
   search.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); runSearch(); }
   });
+
+  function syncViewBtn() {
+    const inLib = atlas.view === "gallery";
+    libBtn.textContent = inLib ? "← 回到站点" : "我的图库";
+    libBtn.classList.toggle("on", inLib);
+    hint.textContent = inLib
+      ? "我的图库 · 上传自己生成的图，读出底模 / LoRA / 提示词"
+      : "线上站点全功能 · 在站点卡片上点复制，回来点「从剪贴板取词」";
+  }
+
+  libBtn.addEventListener("click", () => {
+    /* 图库那一页是插件自己伺服的（同源），站点是跨域的 —— 两边都只改 src，
+       读内部的事一概不做，跨域那条路本来也读不到。 */
+    atlas.view = atlas.view === "gallery" ? "site" : "gallery";
+    syncViewBtn();
+    frame.src = atlas.view === "gallery"
+      ? galleryUrl()
+      : buildAtlasUrl({ codexId, query: search.value.trim() });
+  });
+
+  openBtn.addEventListener("click", () => {
+    window.open(SITE_BASE, "_blank", "noopener");
+  });
+
   closeBtn.addEventListener("click", closeAtlasWindow);
   mask.addEventListener("mousedown", (e) => { if (e.target === mask) closeAtlasWindow(); });
   clearBtn.addEventListener("click", () => {
@@ -827,19 +762,52 @@ function openAtlasWindow({ node, codexId, query } = {}) {
   });
   pushBtn.addEventListener("click", pushPicksToNode);
 
+  pickPosBtn.addEventListener("click", () => pickFromClipboard("positive"));
+  pickNegBtn.addEventListener("click", () => pickFromClipboard("negative"));
+  favBtn.addEventListener("click", () => openFavs(true));
+  favClose.addEventListener("click", () => openFavs(false));
+  favGroupAdd.addEventListener("click", () => {
+    const name = favGroupInput.value.trim();
+    if (!name) { toast("先给新分类起个名字", "info", 2600); return; }
+    if (!atlas.favs.groups.includes(name)) atlas.favs.groups.push(name);
+    favGroupInput.value = "";
+    saveFavs(atlas.favs);
+    renderFavs();
+    toast(`已新建分类：${name}`, "ok", 2600);
+  });
+  favSavePage.addEventListener("click", () => {
+    const url = frame.src;
+    if (!url || url === "about:blank") { toast("现在没有可存的页面", "info", 2600); return; }
+    const inLib = atlas.view === "gallery";
+    addFav({
+      kind: "page",
+      title: inLib ? "我的图库" : (search.value.trim() ? `站点搜索：${search.value.trim()}` : "站点页面"),
+      text: "",
+      url,
+      group: atlas.favs.groups[0],
+    });
+  });
+
   atlas.onKey = (e) => {
-    if (e.key === "Escape") { e.stopPropagation(); closeAtlasWindow(); }
+    if (e.key === "Escape") {
+      /* 收藏板开着就先收收藏板，别一下把整个窗口关了 */
+      if (atlas.favPanel && !atlas.favPanel.hidden) { e.stopPropagation(); openFavs(false); return; }
+      e.stopPropagation();
+      closeAtlasWindow();
+    }
   };
   window.addEventListener("keydown", atlas.onKey, true);
 
+  syncViewBtn();
   setTimeout(() => search.focus(), 30);
 }
 
 /* ---------------------------------------------------------------------------
  * 已选栏
  *
- * 站点卡片点「＋ 加入已选栏」→ postMessage 过来 → 这里按 codex+id 去后端补齐
- * 两个语法版本（站点自己只有 A1111 那份）→ 合并成两份预览 → 推送进节点。
+ * 站点是跨域 iframe，读不到它选中了什么，所以走剪贴板：在站点里点复制，
+ * 回来点「从剪贴板取词」→ 进已选栏 → 合并成两份预览 → 推送到节点。
+ * 收藏载入的条目也走这里（它们自带文本，不用再去哪儿补）。
  * -------------------------------------------------------------------------*/
 
 /* 合并多条词条的 tag：按逗号拆开、忽略大小写去重，保留先出现的写法 */
@@ -864,7 +832,7 @@ function renderPicks() {
   if (!atlas.picks.length) {
     const empty = document.createElement("div");
     empty.className = "ca-pick-empty";
-    empty.textContent = "还没有选中词条。\n在左边站点里点卡片上的「＋ 加入已选栏」。";
+    empty.textContent = "还没有取到词。\n在右边站点卡片上点「全部」复制，回到这里点「＋ 从剪贴板取词」。";
     atlas.listEl.appendChild(empty);
   } else {
     atlas.picks.forEach((pick, index) => {
@@ -910,60 +878,195 @@ function renderPicks() {
   savePicks();
 }
 
-async function addPick({ codex, id, title, kind, tags, negative }) {
-  if (!codex || !id) return;
-  if (atlas.picks.some(p => p.codex === codex && p.id === id)) {
-    toast("这条已经在已选栏里了", "info", 1600);
-    return;
-  }
+/* ============================================================================
+ * 收藏
+ *
+ * 收两样：
+ *   词条文本 —— 从站点复制过来的 prompt，带分类存着，下次一点载入已选栏
+ *   网页位置 —— 站点深链（c / p / entry / q），点「打开」窗口直接跳过去
+ *
+ * 存的是 ComfyUI 这个源的 localStorage。站点自己那套收藏在它自己的源底下，
+ * 跨域读不到，所以这里是另一份、属于工作流这一侧的收藏。
+ * ==========================================================================*/
 
-  /* 「我的图库」的条目自带正负提示词：它不在法典里，后端 /entry 查不到它，
-     所以直接用随消息过来的内容，不用再去补一次。 */
-  const selfContained = kind === "self";
+const FAVS_KEY = "qtc-m8-favs";
+const FAV_SRC = "clipboard";   /* 已选栏里 fake 出来的来源名，loadPicks 要求 codex 非空 */
 
-  /* 先落一条占位的，界面立刻有反馈；随后补齐两个语法版本 */
-  atlas.picks.push({
-    codex,
-    id,
-    title: title || id,
-    tags: selfContained ? String(tags || "") : "",
-    tagsNai: "",
-    negative: selfContained ? String(negative || "") : "",
-    negativeNai: "",
-  });
-  renderPicks();
-
-  if (selfContained) {
-    toast(`已加入：${title || id}（来自我的图库）`, "ok", 2600);
-    return;
-  }
-
+function loadFavs() {
   try {
-    const entry = await apiGet("/entry", { codex, id });
-    const idx = atlas.picks.findIndex(p => p.codex === codex && p.id === id);
-    if (idx >= 0) {
-      Object.assign(atlas.picks[idx], entry);
-      renderPicks();
+    const raw = JSON.parse(localStorage.getItem(FAVS_KEY) || "null");
+    if (raw && Array.isArray(raw.items)) {
+      return {
+        groups: Array.isArray(raw.groups) && raw.groups.length ? raw.groups : ["默认"],
+        items: raw.items.filter(x => x && typeof x === "object" && x.id),
+      };
     }
-  } catch (err) {
-    toast(`取词条失败：${err.message}`, "error", 4500);
+  } catch (err) { /* 坏掉就当没有 */ }
+  return { groups: ["默认"], items: [] };
+}
+
+function saveFavs(favs) {
+  try {
+    localStorage.setItem(FAVS_KEY, JSON.stringify({
+      groups: favs.groups,
+      items: favs.items.slice(0, 300),   /* 别让它无限长下去 */
+    }));
+  } catch (err) { /* 存不下就算了，界面照用 */ }
+}
+
+function addFav({ kind, title, text, url, group }) {
+  const favs = atlas.favs || (atlas.favs = loadFavs());
+  const item = {
+    id: `f${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+    kind,
+    title: String(title || "").slice(0, 60),
+    text: String(text || ""),
+    url: String(url || ""),
+    group: group || favs.groups[0] || "默认",
+    ts: Date.now(),
+  };
+  const dup = favs.items.some(x => (kind === "page" ? x.url && x.url === item.url : x.text === item.text));
+  if (dup) { toast("这条已经收藏过了", "info", 2600); return; }
+  favs.items.unshift(item);
+  saveFavs(favs);
+  renderFavs();
+  toast(kind === "page" ? "已收藏这个网页位置" : "已收藏这条词条", "ok", 2600);
+}
+
+function openFavs(on) {
+  if (!atlas.favPanel) return;
+  atlas.favPanel.hidden = !on;
+  if (on) renderFavs();
+}
+
+function renderFavs() {
+  const list = atlas.favListEl;
+  if (!list) return;
+  const favs = atlas.favs || (atlas.favs = loadFavs());
+  list.textContent = "";
+
+  if (!favs.items.length) {
+    const empty = document.createElement("div");
+    empty.className = "ca-fav-empty";
+    empty.textContent = "还没有收藏。\n\n"
+      + "· 存词条：在右边站点卡片上点「全部」复制 → 点「＋ 从剪贴板取词」→ 点「★ 收藏」\n"
+      + "· 存位置：点「存当前网页位置」，把现在这一页记下来，下次一点直接跳过去";
+    list.appendChild(empty);
+    return;
+  }
+
+  for (const item of favs.items) {
+    const row = document.createElement("div");
+    row.className = "ca-fav";
+
+    const body = document.createElement("div");
+    body.className = "ca-fav-body";
+    const t = document.createElement("div");
+    t.className = "ca-fav-title";
+    t.textContent = (item.kind === "page" ? "🔗 " : "◆ ") + (item.title || "(未命名)");
+    t.title = item.kind === "page" ? item.url : item.text;
+    const sub = document.createElement("div");
+    sub.className = "ca-fav-sub";
+    sub.textContent = item.kind === "page"
+      ? String(item.url).replace(/^https?:\/\/[^/]+/, "")
+      : String(item.text).slice(0, 90);
+    body.append(t, sub);
+
+    const sel = document.createElement("select");
+    for (const g of favs.groups) {
+      const o = document.createElement("option");
+      o.value = g;
+      o.textContent = g;
+      sel.appendChild(o);
+    }
+    sel.value = favs.groups.includes(item.group) ? item.group : favs.groups[0];
+    sel.title = "换个分类";
+    sel.addEventListener("change", () => {
+      item.group = sel.value;
+      saveFavs(favs);
+      toast(`已移到分类「${sel.value}」`, "ok", 2000);
+    });
+
+    const useBtn = document.createElement("button");
+    useBtn.textContent = item.kind === "page" ? "打开" : "载入";
+    useBtn.title = item.kind === "page" ? "让窗口跳到这一页" : "把这条词条放进已选栏";
+    useBtn.addEventListener("click", () => {
+      if (item.kind === "page") {
+        if (!atlas.frame) return;
+        atlas.view = "site";
+        atlas.frame.src = item.url;
+        openFavs(false);
+      } else {
+        if (atlas.picks.some(p => p.id === item.id)) {
+          toast("这条已经在已选栏里了", "info", 2000);
+          return;
+        }
+        /* 两个语法版本给同一份：取来的是哪版就是哪版，不替用户猜
+           （站点自己有 SD 权重开关，它复制出来什么格式，就是用户当时要的格式） */
+        atlas.picks.push({
+          codex: FAV_SRC, id: item.id, title: item.title,
+          tags: item.text, tagsNai: item.text, negative: "", negativeNai: "",
+        });
+        renderPicks();
+        toast(`已载入：${item.title}`, "ok", 2400);
+      }
+    });
+
+    const del = document.createElement("button");
+    del.className = "ca-fav-x";
+    del.textContent = "✕";
+    del.title = "从收藏里删掉";
+    del.addEventListener("click", () => {
+      favs.items = favs.items.filter(x => x.id !== item.id);
+      saveFavs(favs);
+      renderFavs();
+    });
+
+    row.append(body, sel, useBtn, del);
+    list.appendChild(row);
   }
 }
 
-/* 只认自己那个 iframe 发来的消息 */
-function onAtlasMessage(event) {
-  if (!atlas.mask || !atlas.frame) return;
-  if (event.source !== atlas.frame.contentWindow) return;
-  const data = event.data;
-  if (!data || data.source !== "codex-atlas" || data.type !== "pick") return;
-  addPick({
-    codex: data.codex,
-    id: data.id,
-    title: data.title,
-    kind: data.kind,          // "self" = 来自我的图库，内容自带
-    tags: data.tags,
-    negative: data.negative,
-  });
+/* 站点复制「正向 + 角色词」时是用换行分段的，这里折成逗号 —— 后面的去重合并
+   是按逗号走的。空行和两头空白一并收掉，不然会留下 ", , " 这种碎渣。 */
+function normalizeClipText(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map(s => s.trim())
+    .filter(Boolean)
+    .join(", ");
+}
+
+/* 站点在跨域 iframe 里，读不到它选中了什么，所以用剪贴板过渡一下。
+   站点的「全部 / 正向」复制正向串，「负面」复制负向串 —— 分两个按钮，
+   这一次取的是哪一路由你点哪个决定。内容原样放进框里，不做自动转换：
+   站点自己就有 SD 权重开关，它复制出来什么格式，就是你当时要的格式。 */
+async function pickFromClipboard(which) {
+  if (!navigator.clipboard || !navigator.clipboard.readText) {
+    toast("这个环境不让读剪贴板（需要 https 或 127.0.0.1 这种安全上下文）", "error", 6000);
+    return;
+  }
+  let text = "";
+  try {
+    text = await navigator.clipboard.readText();
+  } catch (err) {
+    toast(`读剪贴板失败：${err.message}\n浏览器会弹一次授权，点「允许」；实在不行就复制后粘到下面的框里`, "error", 8000);
+    return;
+  }
+  text = String(text || "").trim();
+  if (!text) {
+    toast("剪贴板是空的 —— 先去右边站点卡片上点一下「全部」或「负面」", "info", 4500);
+    return;
+  }
+  /* 站点复制「正向 + 角色词」时是用换行分段的，这里折成逗号，
+     后面的去重合并按逗号走。 */
+  text = normalizeClipText(text);
+
+  const area = which === "negative" ? atlas.negEl : atlas.posEl;
+  if (!area) return;
+  area.value = text;
+  area.dispatchEvent(new Event("input"));   /* 让字数统计跟着更新 */
+  toast(which === "negative" ? "已取到负向框" : "已取到正向框", "ok", 2400);
 }
 
 async function copyToClipboard(text) {
@@ -1020,9 +1123,6 @@ async function pushPicksToNode() {
   app.graph?.setDirtyCanvas(true, true);
 }
 
-/* 站点那边只在被小窗内嵌时才会发消息过来 */
-window.addEventListener("message", onAtlasMessage);
-
 /* ============================================================================
  * 五、节点控件
  * ==========================================================================*/
@@ -1065,23 +1165,27 @@ function currentCodexId(node) {
 
 /* 本地数据里两个语法版本都是现成的：tags 是转换后的 A1111、tagsNai 是原始 NAI。
    哪一版缺了就退回另一版，不让框子变空。两份底稿一并留在节点上，切语法时原地重渲染。 */
+/* 线上词条只有一份原文：`nai`（原 tags）和 `negative` 都是 NAI 语法。
+   A1111 那一版就在这里用现成的转换函数就地生成 —— 不联网、不重新抽词，
+   切换语法是原地重渲染，不会丢掉你手改过的内容。 */
 function renderEntry(node, entry) {
   const src = entry || {};
-  const a1111 = String(src.tags || "");
-  const naiRaw = String(src.tagsNai || "");
-  const negA1111 = String(src.negative || "");
-  const negNaiRaw = String(src.negativeNai || "");
+  const nai = String(src.nai || src.tags || "");
+  const negNai = String(src.negative || "");
 
-  node.__codexAtlasRaw = {
-    tags: a1111,
-    tagsNai: naiRaw,
-    negative: negA1111,
-    negativeNai: negNaiRaw,
+  node.__codexAtlasRaw = { nai, negative: negNai };
+
+  if (readSyntax(node) === SYNTAX_NAI) {
+    return { text: nai, negative: negNai };
+  }
+  const conv = convertTagsString(nai);
+  const negConv = negNai ? convertTagsString(negNai) : { positive: "", negative: "" };
+  return {
+    text: conv.positive,
+    /* 转换会把正向里权重为负的那批（NAI 的 -1::xxx::）挪出来，
+       所以要把三份负向并在一条里，不然转完就丢了一批。 */
+    negative: mergeTags([conv.negative, negConv.positive, negConv.negative]),
   };
-
-  return readSyntax(node) === SYNTAX_NAI
-    ? { text: naiRaw || a1111, negative: negNaiRaw || negA1111 }
-    : { text: a1111, negative: negA1111 };
 }
 
 function applyRendered(node, rendered) {
@@ -1477,10 +1581,11 @@ app.registerExtension({
   },
 });
 
-/* 供控制台调试用 */
+/* 供控制台调试与测试用 */
 window.__codexAtlas = {
   convertTagsString,
   buildAtlasUrl,
+  galleryUrl,
   openAtlasWindow,
   closeAtlasWindow,
   loadCodexIndex,
@@ -1488,4 +1593,10 @@ window.__codexAtlas = {
   autoRandomAllNodes,
   readAutoRandom,
   writeAutoRandom,
+  pickFromClipboard,
+  normalizeClipText,
+  loadFavs,
+  saveFavs,
+  addFav,
+  renderFavs,
 };

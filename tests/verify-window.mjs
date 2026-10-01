@@ -132,8 +132,25 @@ try {
 
   ok(await ev("typeof window.__codexAtlas === 'object'"), "模块加载完成（没在顶层抛错）");
 
+  /* 造一个假节点 + 假剪贴板：用来验「从剪贴板取词 → 推送进节点」这条核心通路。
+     不这么做就只能验到"按钮在不在"，验不到"点了以后节点里到底有没有东西"。 */
+  await ev(`(() => {
+    window.__testNode = { widgets: [
+      { name: "text", value: "" },
+      { name: "syntax", value: "A1111 语法" },
+      { name: "codex", value: "全部法典（不含 R18）" },
+      { name: "negative", value: "" },
+    ] };
+    if (!navigator.clipboard) {
+      Object.defineProperty(navigator, "clipboard", { value: {}, configurable: true });
+    }
+    /* 站点复制多条时用换行分段 —— 这里就按那个形状给 */
+    navigator.clipboard.readText = async () => "cat girl\\nblue eyes";
+    return true;
+  })()`);
+
   /* 真开一次窗口 */
-  const opened = await ev("(() => { try { window.__codexAtlas.openAtlasWindow({}); return 'ok'; } catch (e) { return '抛出: ' + e.message; } })()");
+  const opened = await ev("(() => { try { window.__codexAtlas.openAtlasWindow({ node: window.__testNode }); return 'ok'; } catch (e) { return '抛出: ' + e.message; } })()");
   ok(opened === "ok", "openAtlasWindow 没抛异常", String(opened));
   await sleep(1500);
 
@@ -176,6 +193,28 @@ try {
   await sleep(400);
   ok(await ev("!document.querySelector('.ca-favs').hidden"), "点「★ 收藏」能打开收藏板");
   ok(await ev("!!document.querySelector('.ca-fav-empty')"), "空收藏时有引导文案");
+
+  /* 核心通路：从剪贴板取词 → 进预览框 → 推送到节点 */
+  await ev(`[...document.querySelectorAll('.ca-tools button')].find(b => b.textContent.includes('从剪贴板取词')).click()`);
+  await sleep(700);
+  const posVal = await ev("document.querySelectorAll('.ca-field textarea')[0].value");
+  ok(posVal === "cat girl, blue eyes", "取词：换行折成逗号后进了正向框", String(posVal));
+
+  await ev(`[...document.querySelectorAll('.ca-side-foot button')].find(b => b.textContent.includes('推送')).click()`);
+  await sleep(600);
+  const nodeText = await ev("window.__testNode.widgets.find(w => w.name === 'text').value");
+  ok(nodeText === "cat girl, blue eyes", "推送：文本真的写进了节点的 text widget", String(nodeText));
+
+  /* 取负面那一路也要能走 */
+  await ev(`navigator.clipboard.readText = async () => "lowres, bad hands"`);
+  await ev(`[...document.querySelectorAll('.ca-tools button')].find(b => b.textContent.includes('取负面')).click()`);
+  await sleep(500);
+  const negVal = await ev("document.querySelectorAll('.ca-field textarea')[1].value");
+  ok(negVal === "lowres, bad hands", "取负面：进了负向框", String(negVal));
+  await ev(`[...document.querySelectorAll('.ca-side-foot button')].find(b => b.textContent.includes('推送')).click()`);
+  await sleep(500);
+  const nodeNeg = await ev("window.__testNode.widgets.find(w => w.name === 'negative').value");
+  ok(nodeNeg === "lowres, bad hands", "推送：负向也写进了节点", String(nodeNeg));
 
   /* 关窗 */
   await ev(`[...document.querySelectorAll('.codex-atlas-bar button')].find(b => b.textContent.trim() === '关闭').click()`);

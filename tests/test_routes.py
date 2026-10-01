@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from aiohttp import web  # noqa: E402
-from aiohttp.test_utils import make_mocked_request  # noqa: E402
+from aiohttp.test_utils import make_mocked_request, TestClient, TestServer  # noqa: E402
 
 from py import routes as routes_mod  # noqa: E402
 from py import store  # noqa: E402
@@ -666,6 +666,56 @@ class TestResolveUnder(unittest.TestCase):
     def test_empty_tail_is_refused(self):
         self.assertIsNone(routes_mod._resolve_under(self.root, ""))
         self.assertIsNone(routes_mod._resolve_under(self.root, None))
+
+
+class TestRealHttpLayer(unittest.TestCase):
+    """真起一个 aiohttp 服务、真发 HTTP 请求。
+
+    上面那些用例都是直接调 handler —— 逻辑是对的，但"装进路由表、经过 aiohttp
+    的 JSON 序列化与静态文件层"这一层没验过。中文编码、Content-Type、
+    路径穿越回 404，都是到这一步才定下来的。
+    """
+
+    def setUp(self):
+        self.app = web.Application()
+        self.app.router.add_get("/codex_atlas/status", routes_mod._handle_status)
+        self.app.router.add_get("/codex_atlas/atlas/{tail:.*}", routes_mod._handle_atlas_static)
+
+    def _get(self, path):
+        async def run():
+            server = TestServer(self.app)
+            client = TestClient(server)
+            await client.start_server()
+            try:
+                async with client.get(path) as resp:
+                    body = await resp.text()
+                    return resp.status, dict(resp.headers), body
+            finally:
+                await client.close()
+        return asyncio.run(run())
+
+    def test_status_over_real_http(self):
+        status, headers, body = self._get("/codex_atlas/status")
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", headers.get("Content-Type", ""))
+        data = json.loads(body)
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["online"])
+
+    def test_gallery_over_real_http(self):
+        status, headers, body = self._get("/codex_atlas/atlas/gallery.html")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", headers.get("Content-Type", ""))
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
+        self.assertIn("我的图库", body, "中文内容在 HTTP 这一层丢了")
+
+    def test_unknown_tail_is_404(self):
+        status, _, _ = self._get("/codex_atlas/atlas/nope/nothing.js")
+        self.assertEqual(status, 404)
+
+    def test_traversal_over_real_http(self):
+        status, _, _ = self._get("/codex_atlas/atlas/..%2F..%2Fpy%2Fstore.py")
+        self.assertEqual(status, 404, "真的走 HTTP 时路径穿越没挡住")
 
 
 if __name__ == "__main__":

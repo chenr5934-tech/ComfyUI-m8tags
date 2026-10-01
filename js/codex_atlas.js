@@ -397,6 +397,9 @@ function closeAtlasWindow() {
   atlas.mask = atlas.frame = atlas.search = atlas.onKey = null;
   atlas.node = null;
   atlas.listEl = atlas.posEl = atlas.negEl = atlas.countEl = null;
+  /* 收藏板那几个引用也要放掉：DOM 已经摘了，留着的话关窗后再有人调 renderFavs
+     就会往一个已脱离文档的节点上写。 */
+  atlas.favPanel = atlas.favListEl = atlas.favGroupInput = null;
   /* 这里**不清** atlas.picks —— 关窗只是收起来，攒的词留着，
      下次打开由 openAtlasWindow 从 localStorage 恢复。要清空有「清空」按钮。 */
 }
@@ -1169,8 +1172,6 @@ function currentCodexId(node) {
   return (map && map.get(v)) || "";
 }
 
-/* 本地数据里两个语法版本都是现成的：tags 是转换后的 A1111、tagsNai 是原始 NAI。
-   哪一版缺了就退回另一版，不让框子变空。两份底稿一并留在节点上，切语法时原地重渲染。 */
 /* 线上词条只有一份原文：`nai`（原 tags）和 `negative` 都是 NAI 语法。
    A1111 那一版就在这里用现成的转换函数就地生成 —— 不联网、不重新抽词，
    切换语法是原地重渲染，不会丢掉你手改过的内容。 */
@@ -1221,13 +1222,13 @@ async function onRandom(node) {
   /* 连点会并发出请求，后到的结果覆盖先到的；直接挡住重复触发 */
   if (node.__codexAtlasBusy) return;
   node.__codexAtlasBusy = true;
-  toast("正在从本地法典抽词…", "info", 1400);
+  toast("正在从线上法典抽词…", "info", 1400);
   try {
     const { entry, rendered } = await drawOnce(node);
 
-    if (readSyntax(node) === SYNTAX_NAI && !entry.tagsNai) {
-      toast("该词条没有原始 NAI 版本，已按 A1111 显示", "info", 4200);
-    }
+    /* 这里以前还有一条「该词条没有原始 NAI 版本」的提示 —— 那是本地数据时代的判断
+       （本地存的是转换后的 A1111，NAI 原文要另外配对，缺了就提示一下）。
+       线上数据本身就只有 NAI 原文，这个条件永远不成立，留着只会每次抽词都弹一句假话。 */
 
     const label = entry.codexTitle || entry.codex || "";
     const tagPreview = entry.title || rendered.text.split(",")[0] || "";
@@ -1448,7 +1449,7 @@ async function fillCodexOptions(node) {
   }
 
   node.__codexAtlas = { titleToId, info };
-  node.__codexAtlasVersion = `${info.dataMtime || "local"}@${(info.codexes || []).length}`;
+  node.__codexAtlasVersion = `${info.release || "unknown"}@${(info.codexes || []).length}`;
   app.graph?.setDirtyCanvas(true, true);
 }
 

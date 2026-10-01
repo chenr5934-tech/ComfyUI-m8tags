@@ -157,11 +157,23 @@ node   tests/test_auto_random.mjs # 前端行为：开关、只抽开着的那�
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
+下面两个要真浏览器（用 `CHROME` 环境变量指过去，不指就用本机装的 Playwright chromium）：
+
+```
+node tests/verify-gallery.mjs     # 图库独立页能不能用（不需要联网）
+node tests/verify-window.mjs      # 真开一次窗口：iframe 加载、图库切换、收藏板、关窗（要联网）
+```
+
 `test_auto_random.mjs` 不起浏览器：把模块里那行裸 import 换成注入的假 `app`，
 照 ComfyUI 的顺序真跑一遍（`setup()` → `nodeCreated()` → 点按钮 → `queuePrompt()`），
 断言的是行为而不是文本 —— 纯文本断言（"文件里有某函数名"）测不出少写一次 `await` 这类问题。
 
 `test_routes.py` 里的在线取数用例不发真请求：`_http_json` 整个换成假的，四跳链条每跳单独验。
+
+`verify-window.mjs` 起一个假后端（假的 `/scripts/app.js` + 真的 `codex_atlas.js` 与 `atlas/`），
+然后在真浏览器里开一次窗口。这条验的是交付物本身 —— "某个按钮根本没挂上"这种问题，
+读代码看不出来。它就是这么抓到一个真 bug 的：预览框的 input 回调闭包抓了参数 `node`，
+而窗口是公开调试入口、不传 node 也能开，于是 `renderPicks` 一渲染就抛异常。
 
 ## 已知边界
 

@@ -634,7 +634,13 @@ function openAtlasWindow({ node, codexId, query } = {}) {
     area.rows = rows;
     area.spellcheck = false;
     const sync = () => { numEl.textContent = `${area.value.length} 字`; };
-    area.addEventListener("input", () => { sync(); node.__codexAtlasRaw = null; });
+    /* 手改之后原始 NAI 底稿就作废了 —— 得挂在 atlas.node 上，不能闭包抓参数：
+       窗口是公开的调试入口，不传 node 也能开，抓参数就会在 renderPicks 里
+       抛「Cannot set properties of undefined」。 */
+    area.addEventListener("input", () => {
+      sync();
+      if (atlas.node) atlas.node.__codexAtlasRaw = null;
+    });
     field.append(lab, area);
     return { field, area, sync };
   };

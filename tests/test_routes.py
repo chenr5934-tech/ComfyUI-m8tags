@@ -627,7 +627,7 @@ class TestAtlasStatic(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
 
     def test_traversal_blocked(self):
-        for bad in ("../py/store.py", "../../ComfyUI-CodexAtlas/py/nodes.py", "..%2F..%2Fmain.py"):
+        for bad in ("../py/store.py", "../../other-plugin/py/nodes.py", "..%2F..%2Fmain.py"):
             with self.assertRaises(web.HTTPNotFound, msg="没挡住：{}".format(bad)):
                 call_static(bad)
 

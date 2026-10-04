@@ -388,20 +388,52 @@ function galleryUrl() {
   return new URL(ATLAS_BASE + "gallery.html", window.location.origin).href;
 }
 
+/* 记住窗口停在哪一页（关窗时和每次改地址时写）。
+ *
+ * 光靠保活还不够：ComfyUI 页面本身一刷新，iframe 就跟着重建，还是回到默认页。
+ * 所以把我们最后一次设过的地址也存一份，下次开窗接着用。
+ *
+ * 只认站点自己的地址 —— 图库页那个地址是插件现算的（galleryUrl()），
+ * 存下来反而会在改路径之后指到一个不存在的地方。 */
+const VIEW_KEY = "qtc-m8-view";
+
+function loadView() {
+  try {
+    const v = JSON.parse(localStorage.getItem(VIEW_KEY) || "null");
+    return v && typeof v === "object" ? v : null;
+  } catch (err) { return null; }
+}
+
+function rememberView() {
+  try {
+    const url = atlas.frame && atlas.frame.src ? String(atlas.frame.src) : "";
+    if (!url || !url.startsWith(SITE_BASE)) return;   /* 图库页不记，见上 */
+    localStorage.setItem(VIEW_KEY, JSON.stringify({
+      url,
+      view: atlas.view || "site",
+      ts: Date.now(),
+    }));
+  } catch (err) { /* 存不下就算了，窗口照用 */ }
+}
+
+/* 关窗只是收起来，**不销毁**。
+ *
+ * 以前这里会把整块 DOM 摘掉、顺手把 iframe 指到 about:blank，下次点开重建。
+ * 重建就意味着 iframe 重新加载，而站点是单页应用：你翻到哪一页、搜了什么、
+ * 转到什么位置，全没了 —— 每次点「前往词典站寻找灵感」都从默认那页开始，
+ * 想接着刚才的看就得自己再找回去。
+ *
+ * 现在留着它（display:none），下次点开原样就在那儿。真正释放交给关掉
+ * ComfyUI 页面 —— 那时整个 frame 随页面一起没。
+ */
 function closeAtlasWindow() {
   if (!atlas.mask) return;
   if (atlas.onKey) window.removeEventListener("keydown", atlas.onKey, true);
-  /* 先掐掉 src 再摘 DOM：站点页面不小，别让它在后台继续加载 */
-  if (atlas.frame) atlas.frame.src = "about:blank";
-  atlas.mask.remove();
-  atlas.mask = atlas.frame = atlas.search = atlas.onKey = null;
+  /* 推送目标要放掉：下次可能在另一个节点上点开，跟着换就行。
+     DOM 上的引用（frame / 预览框 / 收藏板）都留着，它们还在文档里。 */
   atlas.node = null;
-  atlas.listEl = atlas.posEl = atlas.negEl = atlas.countEl = null;
-  /* 收藏板那几个引用也要放掉：DOM 已经摘了，留着的话关窗后再有人调 renderFavs
-     就会往一个已脱离文档的节点上写。 */
-  atlas.favPanel = atlas.favListEl = atlas.favGroupInput = null;
-  /* 这里**不清** atlas.picks —— 关窗只是收起来，攒的词留着，
-     下次打开由 openAtlasWindow 从 localStorage 恢复。要清空有「清空」按钮。 */
+  atlas.mask.style.display = "none";
+  rememberView();
 }
 
 function ensureAtlasStyle() {
@@ -518,13 +550,27 @@ function ensureAtlasStyle() {
 }
 
 function openAtlasWindow({ node, codexId, query } = {}) {
-  if (atlas.mask) closeAtlasWindow();
   ensureAtlasStyle();
+
+  /* 已经开过一次：直接把它显示出来，**绝对不动 iframe**。
+     以前这里写的是「先 close 再重建」，重建等于让站点重新加载一遍 ——
+     用户在里面的浏览位置、搜索、滚动全部重来，这就是"每次点开都重置"的来源。 */
+  if (atlas.mask && atlas.show) {
+    atlas.show({ node });
+    return;
+  }
 
   atlas.node = node;
   atlas.picks = loadPicks();
-  atlas.view = "site";
   atlas.favs = loadFavs();
+
+  /* 上次停在哪一页就还开哪一页；没有记录（或记录不合法）才按节点上的法典去默认位置。
+     这一层是为了兜住「ComfyUI 页面刷新过」—— 那种情况下 iframe 是新建的，
+     保活帮不上忙，只能靠存下来的地址。 */
+  const remembered = loadView();
+  const rememberedUrl = (remembered && typeof remembered.url === "string"
+    && remembered.url.startsWith(SITE_BASE)) ? remembered.url : "";
+  atlas.view = (remembered && remembered.view === "gallery") ? "gallery" : "site";
 
   const mask = document.createElement("div");
   mask.className = "codex-atlas-mask";
@@ -576,7 +622,9 @@ function openAtlasWindow({ node, codexId, query } = {}) {
   /* 站点自己要写剪贴板（复制按钮），这里放行；父页面读剪贴板是另一回事，
      走的是 ComfyUI 这个源自己的权限 */
   frame.setAttribute("allow", "clipboard-read; clipboard-write");
-  frame.src = buildAtlasUrl({ codexId, query });
+  frame.src = atlas.view === "gallery"
+    ? galleryUrl()
+    : (rememberedUrl || buildAtlasUrl({ codexId, query }));
 
   const side = document.createElement("div");
   side.className = "codex-atlas-side";
@@ -730,10 +778,17 @@ function openAtlasWindow({ node, codexId, query } = {}) {
   renderFavs();
 
   /* ------------------------------- 事件 ------------------------------- */
+  /* 换 iframe 地址统一走这里：换完顺手把这一页记下来。
+     直接写 frame.src 的话，刷新过 ComfyUI 页面之后就找不回这个位置了。 */
+  atlas.setSrc = (url) => {
+    frame.src = url;
+    rememberView();
+  };
+
   const runSearch = () => {
     atlas.view = "site";
     syncViewBtn();
-    frame.src = buildAtlasUrl({ codexId, query: search.value.trim() });
+    atlas.setSrc(buildAtlasUrl({ codexId, query: search.value.trim() }));
   };
   goBtn.addEventListener("click", runSearch);
   search.addEventListener("keydown", (e) => {
@@ -754,9 +809,9 @@ function openAtlasWindow({ node, codexId, query } = {}) {
        读内部的事一概不做，跨域那条路本来也读不到。 */
     atlas.view = atlas.view === "gallery" ? "site" : "gallery";
     syncViewBtn();
-    frame.src = atlas.view === "gallery"
+    atlas.setSrc(atlas.view === "gallery"
       ? galleryUrl()
-      : buildAtlasUrl({ codexId, query: search.value.trim() });
+      : (rememberedUrl || buildAtlasUrl({ codexId, query: search.value.trim() })));
   });
 
   openBtn.addEventListener("click", () => {
@@ -806,6 +861,18 @@ function openAtlasWindow({ node, codexId, query } = {}) {
     }
   };
   window.addEventListener("keydown", atlas.onKey, true);
+
+  /* 再次打开时走这条路：只显示，不重建。
+     **不重算预览框** —— renderPicks 会拿已选栏盖掉用户手改过的内容，
+     而"别重置"正是这个窗口的要求。推送目标跟着新节点换就行；
+     想按新节点的语法重算，点「清空」再取一次。 */
+  atlas.show = ({ node: next } = {}) => {
+    if (next) atlas.node = next;
+    atlas.mask.style.display = "";
+    renderFavs();
+    syncViewBtn();
+    window.addEventListener("keydown", atlas.onKey, true);
+  };
 
   syncViewBtn();
   setTimeout(() => search.focus(), 30);
@@ -1001,9 +1068,9 @@ function renderFavs() {
     useBtn.title = item.kind === "page" ? "让窗口跳到这一页" : "把这条词条放进已选栏";
     useBtn.addEventListener("click", () => {
       if (item.kind === "page") {
-        if (!atlas.frame) return;
+        if (!atlas.frame || !atlas.setSrc) return;
         atlas.view = "site";
-        atlas.frame.src = item.url;
+        atlas.setSrc(item.url);
         openFavs(false);
       } else {
         if (atlas.picks.some(p => p.id === item.id)) {

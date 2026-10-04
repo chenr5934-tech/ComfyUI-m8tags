@@ -216,10 +216,67 @@ try {
   const nodeNeg = await ev("window.__testNode.widgets.find(w => w.name === 'negative').value");
   ok(nodeNeg === "lowres, bad hands", "推送：负向也写进了节点", String(nodeNeg));
 
-  /* 关窗 */
+  /* 关窗 = 收起来，不是拆掉 */
   await ev(`[...document.querySelectorAll('.codex-atlas-bar button')].find(b => b.textContent.trim() === '关闭').click()`);
   await sleep(500);
-  ok(await ev("!document.querySelector('.codex-atlas-mask')"), "点「关闭」窗口收掉了");
+  ok(await ev("!!document.querySelector('.codex-atlas-mask')"),
+    "关窗后窗口还在文档里（保活，不是拆掉）");
+  ok(await ev("getComputedStyle(document.querySelector('.codex-atlas-mask')).display === 'none'"),
+    "关窗只是 display:none");
+
+  /* 再打开：必须还是同一个 iframe、地址不变。
+     重建 iframe 就等于让站点重新加载一遍，用户在里面翻到哪儿、搜过什么全丢 ——
+     这正是这次要修的问题，所以这两个断言要钉死。 */
+  await ev(`(() => {
+    window.__frameRef = document.querySelector('.codex-atlas-frame');
+    window.__srcRef = window.__frameRef.src;
+    window.__posRef = document.querySelectorAll('.ca-field textarea')[0].value;
+    return true;
+  })()`);
+  await ev("window.__codexAtlas.openAtlasWindow({ node: window.__testNode })");
+  await sleep(800);
+  ok(await ev("getComputedStyle(document.querySelector('.codex-atlas-mask')).display !== 'none'"),
+    "再打开时窗口显示出来了");
+  ok(await ev("document.querySelector('.codex-atlas-frame') === window.__frameRef"),
+    "再打开是同一个 iframe（没重建，站点不会被重新加载）");
+  ok(await ev("document.querySelector('.codex-atlas-frame').src === window.__srcRef"),
+    "iframe 地址没被重置",
+    String(await ev("document.querySelector('.codex-atlas-frame').src")));
+  ok(await ev("document.querySelectorAll('.ca-field textarea')[0].value === window.__posRef"),
+    "预览框里的内容还在（没被重算盖掉）");
+
+  /* 再验一层：ComfyUI 页面刷新过之后还能不能回到原位置。
+     那种情况下 iframe 是新建的，保活帮不上忙，只能靠存进浏览器的那份地址。 */
+  await ev(`(() => { document.querySelector('.codex-atlas-bar input').value = 'twintails'; return true; })()`);
+  await ev(`[...document.querySelectorAll('.codex-atlas-bar button')].find(b => b.textContent.trim() === '搜索').click()`);
+  await sleep(1500);
+  const searched = await ev("document.querySelector('.codex-atlas-frame').src");
+  ok(String(searched).includes("q=twintails"), "顶栏搜索把关键词送进了站点", String(searched));
+
+  await ev(`[...document.querySelectorAll('.codex-atlas-bar button')].find(b => b.textContent.trim() === '关闭').click()`);
+  await sleep(400);
+
+  await send("Page.reload");
+  await sleep(4000);
+  /* 刷新之后模块重新加载，之前那个假节点也没了，重新造一个 */
+  await ev(`(() => {
+    window.__testNode = { widgets: [
+      { name: "text", value: "" },
+      { name: "syntax", value: "A1111 语法" },
+      { name: "codex", value: "全部法典（不含 R18）" },
+      { name: "negative", value: "" },
+    ] };
+    return true;
+  })()`);
+  await ev("window.__codexAtlas.openAtlasWindow({ node: window.__testNode })");
+  await sleep(3000);
+  const restored = await ev("document.querySelector('.codex-atlas-frame').src");
+  ok(String(restored).includes("q=twintails"),
+    "刷新页面后再开窗，回到了上次那一页（地址从浏览器里恢复）", String(restored));
+
+  /* 收尾：再关一次 */
+  await ev(`[...document.querySelectorAll('.codex-atlas-bar button')].find(b => b.textContent.trim() === '关闭').click()`);
+  await sleep(300);
   ok(errors.length === 0, "全程没有未捕获异常", errors.slice(0, 2).join(" | "));
 
   console.log(`\n===== ${pass}/${pass + fail} 通过 =====`);

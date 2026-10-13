@@ -1434,7 +1434,11 @@ async function autoRandomAllNodes() {
   const all = app.graph?._nodes;
   if (!Array.isArray(all) || !all.length) return 0;
   /* 正被手点抽着的节点跳过，免得两边同时写同一个框 */
-  const targets = all.filter(n => readAutoRandom(n) && widgetByName(n, "text") && !n.__codexAtlasBusy);
+  /* 不能只看 text 框 ——「只抽负向」那个节点的主输入框叫 negative，它没有 text。
+     这么筛漏掉它的话，界面看着一切正常（开关也能点开），就是每次运行都不换词。 */
+  const targets = all.filter(n => readAutoRandom(n)
+    && (widgetByName(n, "text") || widgetByName(n, "negative"))
+    && !n.__codexAtlasBusy);
   if (!targets.length) return 0;
 
   const results = await Promise.allSettled(targets.map(n => drawOnce(n)));

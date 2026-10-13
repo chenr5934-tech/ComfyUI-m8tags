@@ -419,5 +419,28 @@ ok((lastRandomUrl || "").includes("field=negative"),
 ok(String(negNode.widgets.find(w => w.name === "text").value) === "",
   "只抽负向的节点：没去动 text 框");
 
+/* --------------------------- 「只抽负向」的节点也要吃运行前自动随机 */
+
+/* 它的主输入框叫 negative，不叫 text。筛目标时要是只看 text，
+   这个节点的自动随机就永远不触发（而界面看起来一切正常）。 */
+const negAuto = makeNode("CodexAtlasNegative");
+negAuto.widgets = negAuto.widgets.filter(x => x.name !== "text");   /* 真实形状：它没有 text 框 */
+await tagExt.nodeCreated(negAuto);
+await flush();
+const negAutoBtn = w(negAuto, AUTO_PREFIX + "关（点击开启）");
+ok(!!negAutoBtn, "只抽负向的节点上也有自动随机开关");
+negAutoBtn.callback();                                              /* 打开 */
+randomPayload = { codex: "demo", codexTitle: "演示法典", title: "词条己",
+  nai: "cat, dog, hat, warm light", negative: "lowres, blurry, bad hands" };
+app.graph._nodes = [negAuto];
+fetchCalls = [];
+queueCalls.length = 0;
+await app.queuePrompt(0, 1, {});
+ok(fetchCalls.filter(p => p.endsWith("/random")).length === 1,
+  "自动随机：只抽负向的节点也会被抽（它没有 text 框）", fetchCalls.join(","));
+ok(String(w(negAuto, "negative").value).length > 0,
+  "自动随机：负向内容写进了它的 negative 框",
+  String(w(negAuto, "negative").value));
+
 console.log(`\n===== ${pass}/${pass + fail} 通过 =====`);
 process.exit(fail ? 1 : 0);

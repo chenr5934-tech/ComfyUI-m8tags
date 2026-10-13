@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
@@ -146,9 +147,14 @@ def _short(meta: dict) -> dict:
 
 
 async def _handle_codexes(request):
+    force = request.query.get("refresh") == "1"
     try:
-        codexes = _online_codexes(force=request.query.get("refresh") == "1")
-        _, release = _online_base()
+        # 丢到线程里跑。这几跳是同步的 urllib 调用，直接在事件循环里做等于把整个
+        # ComfyUI 后端按住 —— 实测首次要 3 秒起步（四跳网络），抽到几 MB 的法典
+        # 更久，期间前端连心跳都发不进来。用户看到的就是「刚进 CUI 抽不到词，
+        # 先随便浏览一下网页之后才行」：其实是那次阻塞的请求自己跑完了、缓存有了。
+        codexes = await asyncio.to_thread(_online_codexes, force)
+        _, release = await asyncio.to_thread(_online_base, force)
     except Exception as exc:   # noqa: BLE001
         return _json({"ok": False, "error": "取线上法典清单失败：{}".format(exc)}, 502)
 
@@ -232,7 +238,9 @@ async def _handle_random(request):
         return _json({"ok": False, "error": "field 只能是 positive 或 negative"}, 400)
 
     try:
-        metas = [_short(m) for m in _online_codexes()
+        # 同 _handle_codexes：同步取数一律走线程，别占着事件循环
+        raw_metas = await asyncio.to_thread(_online_codexes)
+        metas = [_short(m) for m in raw_metas
                  if isinstance(m, dict) and m.get("id")]
     except Exception as exc:   # noqa: BLE001
         return _json({"ok": False, "error": "取线上法典清单失败：{}".format(exc)}, 502)
@@ -267,7 +275,9 @@ async def _handle_random(request):
         tried.add(pick["id"])
         last_title = pick["title"]
         try:
-            entries = [e for e in _online_entries(pick["id"]) if _usable(e, field)]
+            # 这一跳最重：一部法典 53 KB 到 15 MB 不等，同步跑会把 loop 按住好几秒
+            raw_entries = await asyncio.to_thread(_online_entries, pick["id"])
+            entries = [e for e in raw_entries if _usable(e, field)]
         except Exception as exc:   # noqa: BLE001
             return _json({"ok": False, "error": "取词条失败：{}".format(exc)}, 502)
 

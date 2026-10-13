@@ -21,11 +21,14 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import unittest
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import aiohttp  # noqa: E402
 from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import make_mocked_request, TestClient, TestServer  # noqa: E402
 
@@ -254,6 +257,71 @@ class TestOnlineData(unittest.TestCase):
     def test_random_rejects_unknown_codex(self):
         r = call(routes_mod._handle_random, "/codex_atlas/random?codex=not_there")
         self.assertEqual(r.status, 404)
+
+    def test_event_loop_stays_responsive_while_fetching(self):
+        """抽词期间事件循环不能被堵住。
+
+        这条是给一个真实反馈留的回归：刚进 ComfyUI、缓存还空着的时候点
+        「随机提示词」，后端要串四跳网络（实测首次 5.9 秒；抽到 3 MB 的法典要 13 秒）。
+        那些请求走的是 urllib 同步调用，放在 async handler 里就等于把事件循环按住 ——
+        那段时间 ComfyUI 的其它请求（连前端心跳）全排不进来，用户看到的就是
+        「抽不到 / 无法 get」，而先随便浏览一下网页、等那次请求自己跑完之后就好了。
+
+        做法：并发发一个慢抽词和一个极轻的 /ping，断言后者没被拖住。
+        """
+        original = routes_mod._http_json
+
+        def slow_json(url, timeout=30):
+            time.sleep(0.8)            # 假装一次网络往返
+            return self._fake(url)     # 假的取数层照旧
+
+        routes_mod._http_json = slow_json
+        self.addCleanup(lambda: setattr(routes_mod, "_http_json", original))
+
+        app = web.Application()
+        app.router.add_get("/ping", lambda r: web.json_response({"ok": True}))
+        app.router.add_get("/codex_atlas/random", routes_mod._handle_random)
+
+        def timed(url):
+            t0 = time.perf_counter()
+            try:
+                with urllib.request.urlopen(url, timeout=60) as resp:
+                    resp.read()
+                return time.perf_counter() - t0
+            except Exception:   # noqa: BLE001
+                return 99.0
+
+        async def run():
+            server = TestServer(app)
+            await server.start_server()
+            root = str(server.make_url("/"))
+            try:
+                results = {}
+
+                def fire_slow():
+                    results["slow"] = timed(root + "codex_atlas/random?codex=suozhang")
+
+                def fire_ping():
+                    time.sleep(0.25)          # 让慢请求先跑起来
+                    results["ping"] = timed(root + "ping")
+
+                t1 = threading.Thread(target=fire_slow)
+                t2 = threading.Thread(target=fire_ping)
+                t1.start()
+                t2.start()
+                # 不能 join：join 是同步的，会把这里的 loop 也堵死，
+                # 服务端就没有 loop 去处理请求了。转着等，loop 才在跑。
+                while t1.is_alive() or t2.is_alive():
+                    await asyncio.sleep(0.05)
+                return results
+            finally:
+                await server.close()
+
+        results = asyncio.run(run())
+        ping_dt = results.get("ping", 99.0)
+        self.assertLess(ping_dt, 0.4,
+                        "抽词把事件循环堵住了：慢请求 {} 秒，期间 /ping 等了 {:.2f} 秒".format(
+                            round(results.get("slow", 0), 2), ping_dt))
 
     def test_random_survives_a_broken_source(self):
         def boom(url, timeout=30):

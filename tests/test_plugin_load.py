@@ -136,10 +136,38 @@ class TestPluginLoad(unittest.TestCase):
         any_label = inputs["required"]["codex"][0][0]
         syntax_options = inputs["required"]["syntax"][0]
         text = (PKG_DIR / "js" / "codex_atlas.js").read_text("utf-8")
-        self.assertRegex(text, r'(?m)^const SELF_NODE_TYPES = \["CodexAtlasTag", "CodexAtlasClipEncode"\];\s*$')
         self.assertRegex(text, rf'(?m)^const ANY_LABEL = "{re.escape(any_label)}";\s*$')
         self.assertRegex(text, rf'(?m)^const SYNTAX_A1111 = "{re.escape(syntax_options[0])}";\s*$')
         self.assertRegex(text, rf'(?m)^const SYNTAX_NAI = "{re.escape(syntax_options[1])}";\s*$')
+
+        # SELF_NODE_TYPES 现在是个多行数组（四个节点）。比逐字更有意义的是：
+        # 前端认的这些名字，后端必须真的注册过 —— 少一个，那个节点上的按钮就不挂，
+        # 而表现只是"按钮没出现"，不会报错。
+        block = re.search(r"const SELF_NODE_TYPES = \[(.*?)\];", text, re.S)
+        self.assertIsNotNone(block, "前端找不到 SELF_NODE_TYPES")
+        listed = sorted(re.findall(r'"([A-Za-z_]+)"', block.group(1)))
+        self.assertEqual(listed, sorted(module.NODE_CLASS_MAPPINGS.keys()),
+                         "前端认的节点和后端注册的对不上")
+
+    def test_positive_and_negative_only_nodes(self):
+        """两个「只抽一路」的节点：各自只输出一路，别把另一边也带上。
+
+        用户要的是「一个只抽正面、一个只抽负面」，所以这里把它们的形状钉住 ——
+        单输出、输入框名字也对得上（负向那个的主输入框就叫 negative）。
+        """
+        module = load_plugin(self.table)
+        pos = module.NODE_CLASS_MAPPINGS["CodexAtlasPositive"]
+        neg = module.NODE_CLASS_MAPPINGS["CodexAtlasNegative"]
+
+        self.assertEqual(pos.RETURN_TYPES, ("STRING",))
+        self.assertEqual(pos.RETURN_NAMES, ("positive",))
+        self.assertEqual(neg.RETURN_TYPES, ("STRING",))
+        self.assertEqual(neg.RETURN_NAMES, ("negative",))
+        self.assertEqual(list(pos.INPUT_TYPES()["required"])[:3], ["text", "syntax", "codex"])
+        self.assertEqual(list(neg.INPUT_TYPES()["required"])[:3], ["negative", "syntax", "codex"])
+        for cls in (pos, neg):
+            self.assertEqual(cls.CATEGORY, "法典图鉴")
+            self.assertTrue(hasattr(cls, "VALIDATE_INPUTS"), "codex 没接管校验，选法典会报 Value not in list")
 
     def test_frontend_talks_to_the_online_site(self):
         """窗口正面是线上站点这件事，前后端两边都得对上。

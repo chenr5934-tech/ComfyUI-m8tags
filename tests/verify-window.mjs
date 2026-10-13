@@ -167,12 +167,17 @@ try {
   ok(String(src).includes("c=artist_nai5_personal") && String(src).includes("p=zuud7l"),
     "默认法典与路径码带上了", String(src));
 
-  /* 等 iframe 把站点拉起来 —— 跨域读不到内容，看 CDP 的 target 列表 */
-  await sleep(7000);
-  const targets = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
-  const framed = targets.some(t => String(t.url).includes("novelai.quicktagcloud.com"));
+  /* 等 iframe 把站点拉起来 —— 跨域读不到内容，所以看 CDP 的 target 列表。
+     这一步要真联网，网络抖一下就会假红（实测碰到过一次），所以给它几次机会。 */
+  let framed = false;
+  let lastTargets = [];
+  for (let i = 0; i < 3 && !framed; i++) {
+    await sleep(4000);
+    lastTargets = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
+    framed = lastTargets.some(t => String(t.url).includes("novelai.quicktagcloud.com"));
+  }
   ok(framed, "线上站点真的在 iframe 里加载了（CDP 里能看到那个 frame target）",
-    targets.map(t => t.type + ":" + String(t.url).slice(0, 50)).join(" | "));
+    lastTargets.map(t => t.type + ":" + String(t.url).slice(0, 50)).join(" | "));
 
   /* 图库切换 */
   await ev(`[...document.querySelectorAll('.codex-atlas-bar button')].find(b => b.textContent.trim() === '我的图库').click()`);

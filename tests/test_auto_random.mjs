@@ -40,6 +40,7 @@ const queueCalls = [];
    测试照样绿，功能却是坏的。 */
 const timeline = [];
 let fetchCalls = [];
+let lastRandomUrl = "";   /* /random 的完整 URL（含 query）—— 要断言抽的是哪部法典 */
 let randomPayload = null;
 let originalQueue = null;
 
@@ -86,8 +87,10 @@ function installGlobals() {
   };
   stubDocument();
   globalThis.fetch = async (url) => {
-    const path = new URL(String(url)).pathname;
+    const full = String(url);
+    const path = new URL(full).pathname;
     fetchCalls.push(path);
+    if (path.endsWith("/random")) lastRandomUrl = full;
     if (path.endsWith("/codexes")) {
       return json({ ok: true, codexes: [{ id: "demo", title: "演示法典" }], dataMtime: 1 });
     }
@@ -328,6 +331,93 @@ ok(A.loadFavs().items.length === 300,
 localStorage.setItem("qtc-m8-favs", "{ 这不是 JSON");
 const f4 = A.loadFavs();
 ok(f4.items.length === 0 && f4.groups.length === 1, "收藏：存档坏了就当空的重来，不抛异常");
+
+/* -------------------------------------------------------- 中文注释与标记 */
+
+ok(A.normalizeChinesePrompt("cat, （效果优化组件）, dog") === "cat, dog",
+  "清中文：全角括号注释被删掉", JSON.stringify(A.normalizeChinesePrompt("cat, （效果优化组件）, dog")));
+ok(A.normalizeChinesePrompt("【与下列选择搭配】 leopard ears") === "leopard ears",
+  "清中文：中文方括号分组被删掉", JSON.stringify(A.normalizeChinesePrompt("【与下列选择搭配】 leopard ears")));
+ok(A.normalizeChinesePrompt("角色1: arm around the shoulder, smile") === "arm around the shoulder, smile",
+  "清中文：角色N 标记去掉，后面的内容留着",
+  JSON.stringify(A.normalizeChinesePrompt("角色1: arm around the shoulder, smile")));
+ok(A.normalizeChinesePrompt("cat, 角色, dog") === "cat, dog",
+  "清中文：孤零零一个「角色」tag 也清掉", JSON.stringify(A.normalizeChinesePrompt("cat, 角色, dog")));
+
+/* 这条是边界：半角括号是 A1111 的权重语法，绝不能碰 */
+const weighted = "1.3::medium shot, eye-level::, (blush:1.2), cat";
+ok(A.normalizeChinesePrompt(weighted) === weighted,
+  "清中文：NAI 权重里的逗号和 A1111 的半角括号都不动", JSON.stringify(A.normalizeChinesePrompt(weighted)));
+ok(A.normalizeChinesePrompt("santa costume（圣诞装）, hat") === "santa costume, hat",
+  "清中文：中文译名标注也清掉，留下英文本体");
+
+/* --------------------------------------------------- 抽词方向（新节点） */
+
+ok(A.fieldForNode({ comfyClass: "CodexAtlasTag" }) === "positive", "方向：普通节点抽正向");
+ok(A.fieldForNode({ comfyClass: "CodexAtlasPositive" }) === "positive", "方向：只抽正向的节点");
+ok(A.fieldForNode({ comfyClass: "CodexAtlasNegative" }) === "negative", "方向：只抽负向的节点");
+ok(A.fieldForNode({ type: "CodexAtlasNegative" }) === "negative", "方向：拿不到 comfyClass 时退回 type");
+
+/* --------------------------------- 刷新页面后「选的法典」还算数（问题 4） */
+
+/* 模拟刷新后的那一刻：法典清单还没取回来（titleToId 是空的），
+   但浏览器里存着上次的映射。这时必须能解析出 id，否则就会静默抽成全集。 */
+localStorage.setItem("qtc-m8-codex-map", JSON.stringify({ "所长": "suozhang" }));
+const relNode = makeNode();
+relNode.widgets.find(w => w.name === "codex").value = "所长";
+await A.drawOnce(relNode);
+const lastRandom = lastRandomUrl || "";
+ok(lastRandom.includes("codex=suozhang"),
+  "刷新后：选择框显示某法典时，抽的是那部而不是全集", lastRandom);
+ok(localStorage.getItem("qtc-m8-codex-map") !== null,
+  "刷新后：标题→id 的映射留在浏览器里");
+
+/* 选择框是「全部法典」时不该硬塞一个 codex 进去 */
+const anyNode = makeNode();
+fetchCalls = [];
+await A.drawOnce(anyNode);
+ok(!(lastRandomUrl || "").includes("codex=suozhang") || (lastRandomUrl || "").includes("codex=&"),
+  "选「全部法典」时不带具体法典参数", lastRandomUrl);
+
+/* ------------------------------------ 开关刷新后不该显示成「关」（问题 1） */
+
+const cfgNode = makeNode();
+await tagExt.nodeCreated(cfgNode);
+await flush();
+/* configure 到来时 properties 才被填上 —— 这里直接模拟那一刻 */
+cfgNode.properties.codexAtlasAutoRandom = true;
+const autoBtnNow = cfgNode.widgets.find(w => w.name.startsWith("运行自动随机"));
+ok(!!autoBtnNow && autoBtnNow.name.includes("关"),
+  "configure 之前：按钮文字还是「关」（这正是要修的现象）");
+if (typeof cfgNode.onConfigure === "function") cfgNode.onConfigure({});
+const autoBtnAfter = cfgNode.widgets.find(w => w.name.startsWith("运行自动随机"));
+ok(!!autoBtnAfter && autoBtnAfter.name.includes("开"),
+  "configure 之后：按钮文字跟着 properties 刷成「开」",
+  autoBtnAfter ? autoBtnAfter.name : "(没找到按钮)");
+
+/* ------------------------------- 两个「只抽一路」的节点各写各的框 */
+
+randomPayload = { codex: "demo", codexTitle: "演示法典", title: "词条戊",
+  nai: "cat, dog, hat, warm light", negative: "lowres, bad hands, blurry" };
+
+const posNode = makeNode("CodexAtlasPositive");
+posNode.widgets = posNode.widgets.filter(w => w.name !== "negative");   /* 它本来就没有负向框 */
+fetchCalls = [];
+await A.drawOnce(posNode);
+ok(String(posNode.widgets.find(w => w.name === "text").value).includes("cat"),
+  "只抽正向的节点：内容写进了 text",
+  String(posNode.widgets.find(w => w.name === "text").value));
+
+const negNode = makeNode("CodexAtlasNegative");
+fetchCalls = [];
+await A.drawOnce(negNode);
+ok(String(negNode.widgets.find(w => w.name === "negative").value).length > 0,
+  "只抽负向的节点：内容写进了 negative",
+  String(negNode.widgets.find(w => w.name === "negative").value));
+ok((lastRandomUrl || "").includes("field=negative"),
+  "只抽负向的节点：请求带上了 field=negative", lastRandomUrl);
+ok(String(negNode.widgets.find(w => w.name === "text").value) === "",
+  "只抽负向的节点：没去动 text 框");
 
 console.log(`\n===== ${pass}/${pass + fail} 通过 =====`);
 process.exit(fail ? 1 : 0);

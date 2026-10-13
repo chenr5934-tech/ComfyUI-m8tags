@@ -21,8 +21,19 @@ const SITE_PATH = "zuud7l";                  /* 对应 ?p= 的路径码 */
 /* 图库是插件自己伺服的一页（同源），窗口在「站点」和「我的图库」之间切换 */
 const ATLAS_BASE = "/codex_atlas/atlas/";
 const API_BASE = "/codex_atlas";
-/* 本插件自己的节点 —— 按钮长在它们自己身上，不去动 ComfyUI 内置的节点 */
-const SELF_NODE_TYPES = ["CodexAtlasTag", "CodexAtlasClipEncode"];
+/* 本插件自己的节点 —— 按钮长在它们自己身上，不去动 ComfyUI 内置的节点。
+   后两个是「只抽一路」的版本：抽的时候要告诉后端抽哪一路，渲染时只写对应的框。 */
+const SELF_NODE_TYPES = [
+  "CodexAtlasTag", "CodexAtlasClipEncode", "CodexAtlasPositive", "CodexAtlasNegative",
+];
+const POSITIVE_ONLY = "CodexAtlasPositive";
+const NEGATIVE_ONLY = "CodexAtlasNegative";
+
+/* 抽词方向：普通节点两路都写，两个「只抽一路」的节点各写各的 */
+function fieldForNode(node) {
+  const type = node.comfyClass || node.type;
+  return type === NEGATIVE_ONLY ? "negative" : "positive";
+}
 
 const ANY_LABEL = "全部法典（不含 R18）";
 const SYNTAX_A1111 = "A1111 语法";
@@ -44,6 +55,29 @@ const SYNTAX_NAI = "原始 NAI 语法";
  * 11. 标签内字面括号  → \(…\)
  * 12. | 分块 → ,      纯符号权重残留丢弃
  * ==========================================================================*/
+
+/* NAI v5 的数据里混着中文，SD / A1111 一个字都不认，留在提示词里就是噪声 ——
+   "随机出中文"的观感就是从这儿来的。实测线上全部含中文的词条，只有这三类，
+   没有整句中文描述：
+     （…）    全角括号里的注释，如「（效果优化组件）」「（此tag须在最前）」
+     角色N:   NAI 的多角色标记，如「角色1: arm around the...」
+     【…】    中文方括号分组，如「【豹】」「【与下列选择搭配】」
+   注释与分组标记整段去掉；角色标记只去掉标记本身、后面的内容留着。
+   **只认全角括号** —— 半角 (x:1.2) 是 A1111 的权重语法，动不得。 */
+function normalizeChinesePrompt(raw) {
+  let s = String(raw || "");
+  s = s.replace(/[（(][^）)]*[\u4e00-\u9fff][^）)]*[）)]/g, " ");
+  s = s.replace(/【[^】]*】/g, " ");
+  s = s.replace(/角色\s*[0-9]+\s*[:：]/g, " ");
+  s = s.replace(/(^|,)(\s*角色\s*)(?=,|$)/g, "$1");
+  /* 删完会留下 "a, , b" 这种碎渣，收一下。
+     但**不能**按逗号拆开再拼回去 —— NAI 的 `1.3::medium shot, eye-level::`
+     逗号在权重里面，拆了就把权重切坏了。 */
+  s = s.replace(/(?:,\s*){2,}/g, ", ");
+  s = s.replace(/\s+,/g, ",");                          /* 删出空档后逗号前会多个空格 */
+  s = s.replace(/^\s*,\s*/, "").replace(/\s*,\s*$/, "");
+  return s.replace(/\s{2,}/g, " ").trim();
+}
 
 function fmtWeight(w) {
   const s = w.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
@@ -698,9 +732,11 @@ function openAtlasWindow({ node, codexId, query } = {}) {
 
   const posField = mkField("POSITIVE（推送出去的就是这里）", 9, {
     text: "转成 A1111",
-    title: "把 NAI 语法（1.3::词::）就地转成 A1111 权重语法（词:1.3）；权重为负的会挪进负向框",
+    title: "先清掉中文注释与标记，再把 NAI 语法（1.3::词::）转成 A1111 权重语法（词:1.3）；权重为负的会挪进负向框",
     run: () => {
-      const conv = convertTagsString(posField.area.value);
+      /* 两步都要：清中文注释 + 转权重语法。用户点这个按钮就是要"变成能直接用的 A1111" */
+      const cleaned = normalizeChinesePrompt(posField.area.value);
+      const conv = convertTagsString(cleaned);
       const merged = mergeTags([conv.positive]);
       posField.area.value = merged;
       posField.sync();
@@ -1231,11 +1267,27 @@ function writeSyntax(node, value) {
   node.properties.codexAtlasSyntax = value;
 }
 
+/* 标题 → 法典 id 的映射要缓存一份到浏览器里。
+ *
+ * 这份映射是异步建起来的（得先联网取法典清单）。刷新页面之后到取完之前有个窗口期，
+ * 那段时间里 `node.__codexAtlas.titleToId` 是空的 —— 而 `currentCodexId` 一取不到
+ * 就返回空串，后端收到空串就走「全部法典」。于是表现成：选择框里明明选着某部法典，
+ * 抽出来的却是全集的词。缓存一份就能把这段窗口期盖过去（离线也能解析）。 */
+const CODEX_MAP_KEY = "qtc-m8-codex-map";
+
+function cachedTitleToId() {
+  try {
+    const v = JSON.parse(localStorage.getItem(CODEX_MAP_KEY) || "null");
+    return v && typeof v === "object" ? new Map(Object.entries(v)) : null;
+  } catch (err) { return null; }
+}
+
 function currentCodexId(node) {
   const w = widgetByName(node, "codex");
   const v = w?.value;
   if (!v || v === ANY_LABEL) return "";
-  const map = node.__codexAtlas?.titleToId;
+  const live = node.__codexAtlas && node.__codexAtlas.titleToId;
+  const map = (live && live.size) ? live : cachedTitleToId();
   return (map && map.get(v)) || "";
 }
 
@@ -1244,8 +1296,9 @@ function currentCodexId(node) {
    切换语法是原地重渲染，不会丢掉你手改过的内容。 */
 function renderEntry(node, entry) {
   const src = entry || {};
-  const nai = String(src.nai || src.tags || "");
-  const negNai = String(src.negative || "");
+  /* 先清中文注释与标记 —— 两种语法下它都是噪声，见 normalizeChinesePrompt */
+  const nai = normalizeChinesePrompt(src.nai || src.tags || "");
+  const negNai = normalizeChinesePrompt(src.negative || "");
 
   node.__codexAtlasRaw = { nai, negative: negNai };
 
@@ -1263,6 +1316,16 @@ function renderEntry(node, entry) {
 }
 
 function applyRendered(node, rendered) {
+  const type = node.comfyClass || node.type;
+  /* 两个「只抽一路」的节点各写各的框，不去碰另一边 */
+  if (type === POSITIVE_ONLY) {
+    setWidgetValue(node, "text", rendered.text);
+    return;
+  }
+  if (type === NEGATIVE_ONLY) {
+    setWidgetValue(node, "negative", rendered.negative);
+    return;
+  }
   setWidgetValue(node, "text", rendered.text);
   if (widgetByName(node, "negative")) {
     /* 无条件写，包括空字符串。原来是 `if (!rendered.negative) return;` ——
@@ -1279,7 +1342,21 @@ function applyRendered(node, rendered) {
 /* 抽一条词写进框里。手点按钮和「运行自动随机」共用这一条路径 ——
    框里看到的就是提交出去的那份，不会出现"自动抽只改后端、界面留着旧词"的两套行为。 */
 async function drawOnce(node) {
-  const entry = await apiGet("/random", { codex: currentCodexId(node) });
+  const w = widgetByName(node, "codex");
+  let codexId = currentCodexId(node);
+  /* 选择框里明明选着一部法典，却解析不出 id —— 说明映射还没建好（法典清单是异步取的）。
+     这时直接往下走就会静默抽成"全部法典"的词，用户看到的现象正是"选择框显示某某法典、
+     抽出来的却是全集"。补一次清单再解析一遍。 */
+  if (!codexId && w && w.value && w.value !== ANY_LABEL) {
+    try {
+      await fillCodexOptions(node);
+    } catch (err) { /* 取不到就按空的走，后端会走全集 */ }
+    codexId = currentCodexId(node);
+  }
+  const entry = await apiGet("/random", {
+    codex: codexId,
+    field: fieldForNode(node),
+  });
   const rendered = renderEntry(node, entry);
   applyRendered(node, rendered);
   return { entry, rendered };
@@ -1516,6 +1593,11 @@ async function fillCodexOptions(node) {
   }
 
   node.__codexAtlas = { titleToId, info };
+  /* 顺手存一份到浏览器：刷新页面后到清单取回来之前还有一段窗口期，
+     那会儿解析「选的是哪部法典」只能靠它（见 cachedTitleToId 的注释）。 */
+  try {
+    localStorage.setItem(CODEX_MAP_KEY, JSON.stringify(Object.fromEntries(titleToId)));
+  } catch (err) { /* 存不下就算了，映射建好后照样能用 */ }
   node.__codexAtlasVersion = `${info.release || "unknown"}@${(info.codexes || []).length}`;
   app.graph?.setDirtyCanvas(true, true);
 }
@@ -1534,6 +1616,23 @@ function setupNode(node) {
 
   const added = attachButtons(node);
   if (added.length) moveWidgetsAfter(node, added, 1);
+
+  /* 建节点这一刻 properties 还是空的，所以「运行自动随机」的按钮文字那会儿读出来
+     必然是「关」；而 properties 要等 configure（从工作流或自动存档恢复节点值）
+     才填回来。不补这一手，刷新页面后开关看着就像被关掉了 —— 状态其实还在，
+     只是那行字没跟着刷。
+     注意别在这里顺手把状态改掉：只刷显示，读的仍然是 properties。 */
+  const prevConfigure = node.onConfigure;
+  node.onConfigure = function (...args) {
+    const result = typeof prevConfigure === "function"
+      ? prevConfigure.apply(this, args)
+      : undefined;
+    try {
+      const btn = node.__codexAtlasAutoBtn;
+      if (btn) btn.name = autoRandomLabel(node);
+    } catch (err) { /* 刷新按钮文字失败不该影响节点加载 */ }
+    return result;
+  };
 
   const syntaxWidget = widgetByName(node, "syntax");
   if (syntaxWidget) {
@@ -1669,6 +1768,9 @@ window.__codexAtlas = {
   writeAutoRandom,
   pickFromClipboard,
   normalizeClipText,
+  normalizeChinesePrompt,
+  fieldForNode,
+  currentCodexId,
   loadFavs,
   saveFavs,
   addFav,

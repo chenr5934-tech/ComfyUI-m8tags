@@ -12,6 +12,7 @@ import base64
 import json
 import os
 import random
+import re
 import shutil
 import threading
 import time
@@ -183,9 +184,52 @@ def _entry_payload(codex_id: str, entry: dict, meta: dict | None = None,
     }
 
 
+_MEANINGFUL = re.compile(r"[A-Za-z0-9]")
+
+
+def _tag_list(entry: dict) -> list:
+    return [x for x in str(entry.get("tags") or "").split(",") if x.strip()]
+
+
+def _entry_weight(entry: dict) -> float:
+    """抽中权重 —— 用来顶住「随机质量一般」的那条反馈。
+
+    均匀随机会把 `👻👻👻`、只有一两个 tag 的条目也照样抽出来，观感就是"抽到的
+    东西很水"。实测线上数据：85%~100% 的词条有 8 个以上 tag，所以按 tag 个数加权
+    —— 长尾仍然可能抽到，但明显偏向信息量大的那些。有配图的再抬一半，
+    那说明它被社区拿来当过示例。
+    """
+    n = len(_tag_list(entry))
+    w = float(min(n, 20))          # 封顶：30 多个 tag 的不至于一家独大
+    if entry.get("image"):
+        w *= 1.5
+    return max(w, 1.0)
+
+
+def _usable(entry: dict, field: str) -> bool:
+    """这条词条够不够格进随机池。
+
+    抽正向看 tags；抽负向看 negative 字段 —— 线上自带负向的词条只占约 3.9%，
+    池子本来就小，那边不再额外卡长度。
+    """
+    if field == "negative":
+        return bool(str(entry.get("negative") or "").strip())
+    tags = str(entry.get("tags") or "").strip()
+    if not tags:
+        return False
+    if not _MEANINGFUL.search(tags):        # 纯符号 / emoji，SD 拿它没意义
+        return False
+    if len(_tag_list(entry)) < 3:           # 一两个 tag 撑不起一张图
+        return False
+    return True
+
+
 async def _handle_random(request):
     wanted = (request.query.get("codex") or CODEX_ANY).strip()
     include_nsfw = (request.query.get("nsfw") or "").lower() in ("1", "true", "yes")
+    field = (request.query.get("field") or "positive").strip().lower()
+    if field not in ("positive", "negative"):
+        return _json({"ok": False, "error": "field 只能是 positive 或 negative"}, 400)
 
     try:
         metas = [_short(m) for m in _online_codexes()
@@ -212,21 +256,40 @@ async def _handle_random(request):
     if not pool:
         return _json({"ok": False, "error": "没有可用的法典（可能都被 R18 过滤掉了）"}, 404)
 
-    # 多法典时先随机挑一部，再随机挑一条，避免总从同一本里抽
-    pick = random.choice(pool)
-    codex_id = pick["id"]
-    try:
-        entries = [e for e in _online_entries(codex_id)
-                   if str(e.get("tags") or "").strip()]
-    except Exception as exc:   # noqa: BLE001
-        return _json({"ok": False, "error": "取词条失败：{}".format(exc)}, 502)
+    # 只抽负向时，全集模式下随机挑中的那部很可能一条负向都没有（线上只有约 3.9%
+    # 的词条带负向，且集中在少数几部）—— 换一部再试几次，别让用户每次都被顶回来。
+    attempts = 5 if (field == "negative" and (not wanted or wanted == CODEX_ANY)) else 1
+    tried = set()
+    last_title = ""
+    for _ in range(attempts):
+        remaining = [m for m in pool if m["id"] not in tried]
+        pick = random.choice(remaining or pool)
+        tried.add(pick["id"])
+        last_title = pick["title"]
+        try:
+            entries = [e for e in _online_entries(pick["id"]) if _usable(e, field)]
+        except Exception as exc:   # noqa: BLE001
+            return _json({"ok": False, "error": "取词条失败：{}".format(exc)}, 502)
 
-    if not entries:
-        return _json({"ok": False, "error": "「{}」里没有可用词条".format(pick["title"])}, 404)
+        if not entries:
+            if len(tried) >= len(pool):
+                break
+            continue
 
-    payload = _entry_payload(codex_id, random.choice(entries), pick)
-    payload["ok"] = True
-    return _json(payload)
+        # 多法典时先随机挑一部，再按权重挑一条 —— 权重见 _entry_weight
+        entry = random.choices(entries, weights=[_entry_weight(e) for e in entries], k=1)[0]
+        payload = _entry_payload(pick["id"], entry, pick)
+        payload["ok"] = True
+        payload["field"] = field
+        return _json(payload)
+
+    if field == "negative":
+        return _json({
+            "ok": False,
+            "error": "「{}」里没有自带负向的词条。线上只有少数法典带负向"
+                     "（enter_codex 那部最多），把节点上的「法典来源」切到它试试。".format(last_title),
+        }, 404)
+    return _json({"ok": False, "error": "「{}」里没有可用词条".format(last_title)}, 404)
 
 
 # ---------------------------------------------------------------------------

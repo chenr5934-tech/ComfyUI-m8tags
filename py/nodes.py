@@ -139,12 +139,106 @@ class CodexAtlasClipEncode:
         return (positive, neg)
 
 
+class CodexAtlasPositive:
+    """法典图鉴 · 只抽正向
+
+    和「法典图鉴 · 提示词」是同一套按钮，区别只在于它只往正向框里写东西。
+    有人要正负各一个节点分开摆（比如正向节点接主提示词、负向节点接另一路），
+    所以拆出来，而不是在一个节点上塞两个模式开关。
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {
+                    "multiline": True,
+                    "default": "",
+                    "dynamicPrompts": False,
+                    "tooltip": "正向提示词。点「随机提示词」只往这里填；开着「运行自动随机」时每次运行都会重新抽。",
+                }),
+                "syntax": (list(SYNTAX_OPTIONS), {
+                    "default": SYNTAX_A1111,
+                    "tooltip": "语法风格：抽到的词按 A1111 权重语法转换，或保留原始 NAI 语法写法。",
+                }),
+                "codex": ([CODEX_ANY], {
+                    "default": CODEX_ANY,
+                    "tooltip": "随机抽词的来源法典，列表实时来自线上站点。选「全部法典」时不会抽画师词典里的词条；想抽就明确选中那一部。",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("positive",)
+    FUNCTION = "emit"
+    CATEGORY = "法典图鉴"
+    DESCRIPTION = "法典图鉴的「只抽正向」版：随机抽词只写正向框，输出一路 STRING。"
+    OUTPUT_NODE = False
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, codex):
+        """同 CodexAtlasTag：codex 的候选项由前端实时写入，服务端放行任意值。"""
+        return True
+
+    def emit(self, text, syntax, codex):
+        return (text,)
+
+
+class CodexAtlasNegative:
+    """法典图鉴 · 只抽负向
+
+    只往负向框里写。线上词条自带负向的比例不高（实测约 3.9%，且集中在
+    enter_codex 那部），所以后端在只抽负向时会从「带负向的词条」里挑，
+    挑不到就没得抽 —— 这一点在前端会明说，不会悄悄塞一条空串。
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "negative": ("STRING", {
+                    "multiline": True,
+                    "default": "",
+                    "dynamicPrompts": False,
+                    "tooltip": "负向提示词。点「随机提示词」只往这里填；开着「运行自动随机」时每次运行都会重新抽。",
+                }),
+                "syntax": (list(SYNTAX_OPTIONS), {
+                    "default": SYNTAX_A1111,
+                    "tooltip": "语法风格：抽到的词按 A1111 权重语法转换，或保留原始 NAI 语法写法。",
+                }),
+                "codex": ([CODEX_ANY], {
+                    "default": CODEX_ANY,
+                    "tooltip": "只抽负向时的来源法典。不是每部法典都带负向，抽不到会明确提示。",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("negative",)
+    FUNCTION = "emit"
+    CATEGORY = "法典图鉴"
+    DESCRIPTION = "法典图鉴的「只抽负向」版：随机抽词只写负向框，输出一路 STRING。"
+    OUTPUT_NODE = False
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, codex):
+        """同 CodexAtlasTag：codex 的候选项由前端实时写入，服务端放行任意值。"""
+        return True
+
+    def emit(self, negative, syntax, codex):
+        return (negative,)
+
+
 NODE_CLASS_MAPPINGS = {
     "CodexAtlasTag": CodexAtlasTag,
     "CodexAtlasClipEncode": CodexAtlasClipEncode,
+    "CodexAtlasPositive": CodexAtlasPositive,
+    "CodexAtlasNegative": CodexAtlasNegative,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "CodexAtlasTag": "法典图鉴 · 提示词",
     "CodexAtlasClipEncode": "法典图鉴 · 文本编码",
+    "CodexAtlasPositive": "法典图鉴 · 只抽正向",
+    "CodexAtlasNegative": "法典图鉴 · 只抽负向",
 }

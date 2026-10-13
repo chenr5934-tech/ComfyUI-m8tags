@@ -79,11 +79,14 @@ class TestOnlineData(unittest.TestCase):
                 {"id": "mengshen_r18", "title": "梦神R18", "entryCount": 1},
             ],
             base + "/suozhang.json": {"entries": [
-                {"id": "a", "title": "甲", "tags": "1.2::cat::, dog", "negative": "lowres"},
-                {"id": "b", "title": "乙", "tags": "bird", "negative": ""},
+                {"id": "a", "title": "甲",
+                 "tags": "1.2::cat::, dog, sitting on a windowsill, warm afternoon light",
+                 "negative": "lowres"},
+                {"id": "b", "title": "乙", "tags": "bird, sky, clouds", "negative": ""},
             ]},
             base + "/artist_nai5_personal.json": {"entries": [
-                {"id": "p1", "title": "画师甲", "tags": "artist:someone", "negative": ""},
+                {"id": "p1", "title": "画师甲",
+                 "tags": "artist:someone, portrait, soft light", "negative": ""},
             ]},
             base + "/mengshen_r18.json": {"entries": [
                 {"id": "r1", "title": "R18 词条", "tags": "nsfw thing", "negative": ""},
@@ -187,7 +190,66 @@ class TestOnlineData(unittest.TestCase):
                             "/codex_atlas/random?codex=artist_nai5_personal"))
         self.assertTrue(data["ok"])
         self.assertEqual(data["codex"], "artist_nai5_personal")
-        self.assertEqual(data["nai"], "artist:someone")
+        self.assertIn("artist:someone", data["nai"])
+
+    def test_random_negative_only_returns_entries_with_negative(self):
+        """只抽负向：返回的那条必须真的自带负向，不能是空串。"""
+        data = body_of(call(routes_mod._handle_random, "/codex_atlas/random?field=negative"))
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["field"], "negative")
+        self.assertTrue(str(data["negative"]).strip(), "只抽负向却返回了空负向")
+
+    def test_random_negative_reports_when_nothing_has_one(self):
+        """整池都没负向时要明说，不能悄悄回一条空串 ——
+        用户会以为"抽到了但内容为空"，其实是没有可抽的东西。"""
+        base = "{}/releases/{}".format(CDN_BASE, self.RELEASE)
+        for name in ("suozhang", "artist_nai5_personal", "mengshen_r18"):
+            self.payloads[base + "/{}.json".format(name)] = {"entries": [
+                {"id": "x", "title": "无负向", "tags": "a, b, c, d", "negative": ""}]}
+        r = call(routes_mod._handle_random, "/codex_atlas/random?field=negative")
+        self.assertEqual(r.status, 404)
+        self.assertIn("负向", body_of(r)["error"])
+
+    def test_random_rejects_unknown_field(self):
+        r = call(routes_mod._handle_random, "/codex_atlas/random?field=whatever")
+        self.assertEqual(r.status, 400)
+
+    def test_random_filters_out_junk_entries(self):
+        """质量过滤：空 tags、纯 emoji、只有一两个 tag 的都不该被抽中。
+
+        这几类就是「随机质量一般」反馈的来源 —— 实测线上确有 '👻👻👻' 和空串。
+        """
+        base = "{}/releases/{}".format(CDN_BASE, self.RELEASE)
+        self.payloads[base + "/suozhang.json"] = {"entries": [
+            {"id": "junk-empty", "title": "空", "tags": "", "negative": ""},
+            {"id": "junk-emoji", "title": "emoji", "tags": "👻👻👻", "negative": ""},
+            {"id": "junk-short", "title": "太短", "tags": "cat, dog", "negative": ""},
+            {"id": "good", "title": "完整",
+             "tags": "cat, dog, hat, sitting, warm afternoon light", "negative": ""},
+        ]}
+        seen = set()
+        for _ in range(25):
+            seen.add(body_of(call(routes_mod._handle_random,
+                                  "/codex_atlas/random?codex=suozhang"))["id"])
+        self.assertEqual(seen, {"good"}, "垃圾词条混进了随机池：{}".format(sorted(seen)))
+
+    def test_random_weights_towards_richer_entries(self):
+        """加权：信息量大的词条被抽中的次数应该明显更多。
+
+        没有这条，_entry_weight 写成 return 1 也照样绿 —— 那等于没做质量提升。
+        """
+        base = "{}/releases/{}".format(CDN_BASE, self.RELEASE)
+        self.payloads[base + "/suozhang.json"] = {"entries": [
+            {"id": "tiny", "title": "短", "tags": "a, b, c", "negative": ""},
+            {"id": "rich", "title": "长",
+             "tags": ", ".join("tag{}".format(i) for i in range(16)), "negative": ""},
+        ]}
+        counts = {"tiny": 0, "rich": 0}
+        for _ in range(200):
+            counts[body_of(call(routes_mod._handle_random,
+                                "/codex_atlas/random?codex=suozhang"))["id"]] += 1
+        self.assertGreater(counts["rich"], counts["tiny"] * 2,
+                           "16 个 tag 的词条没有明显更常被抽到：{}".format(counts))
 
     def test_random_rejects_unknown_codex(self):
         r = call(routes_mod._handle_random, "/codex_atlas/random?codex=not_there")
